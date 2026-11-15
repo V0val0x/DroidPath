@@ -1,0 +1,42 @@
+name: Release DroidPath
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build single-DEX android-daemon.jar
+        run: |
+          chmod +x android-daemon/gradlew android-daemon/scripts/*.sh
+          ./android-daemon/scripts/build-dex.sh
+
+      - name: Build release droidpath-mcp binary
+        run: swift build -c release
+
+      - name: Package release artifacts
+        run: |
+          mkdir -p dist
+          cp .build/release/droidpath-mcp dist/droidpath-mcp
+          cp android-daemon/build/dist/android-daemon.jar dist/android-daemon.jar
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/droidpath-mcp
+            dist/android-daemon.jar
+          generate_release_notes: true

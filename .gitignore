@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj
+dist/
+android-daemon/.gradle/
+android-daemon/build/
+android-daemon/.kotlin/
+android-daemon/local.properties
+shadow_graph.json
