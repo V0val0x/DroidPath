@@ -49,6 +49,23 @@ public actor DroidPathADBRunner {
         return trimmed.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
+    public static func validatePackageName(_ packageName: String) -> Bool {
+        let trimmed = packageName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 255, !trimmed.hasPrefix("-"), !trimmed.hasPrefix("."), !trimmed.hasSuffix(".") else {
+            return false
+        }
+        guard trimmed.contains(".") else { return false }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._")
+        return trimmed.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    /// Safely single-quotes an arbitrary string for POSIX `/system/bin/sh` (Android `adb shell`),
+    /// stripping NUL bytes so no metacharacter (`;`, `|`, `&`, `$()`, backticks, redirects) can execute.
+    public static func shellQuote(_ value: String) -> String {
+        let sanitized = value.replacingOccurrences(of: "\0", with: "")
+        return "'" + sanitized.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     public static func resolveADBPath() -> String? {
         let env = ProcessInfo.processInfo.environment
         var candidates: [String] = []

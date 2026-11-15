@@ -209,7 +209,7 @@ public final class DroidPathUITreeFallbackParser: NSObject, XMLParserDelegate {
 
 public final class DroidPathMCPServerCore: @unchecked Sendable {
     public static let protocolVersion = "2024-11-05"
-    public static let serverVersion = "1.0.0"
+    public static let serverVersion = "1.0.1"
 
     public let manager: DroidPathManager
     public let adbRunner: DroidPathADBRunner
@@ -388,11 +388,12 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
             ),
             MCPToolDefinition(
                 name: "android_type_text",
-                description: "Types ASCII text into the focused Android input field.",
+                description: "Types ASCII or Unicode text into the focused Android input field with optional press_enter.",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
                         "text": .object(["type": .string("string"), "description": .string("Text to type.")]),
+                        "press_enter": .object(["type": .string("boolean"), "description": .string("Send ENTER keyevent after typing.")]),
                         "device_serial": serialProp
                     ]),
                     "required": .array([.string("text")])
@@ -497,22 +498,29 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
 
                 await manager.ensureStarted(serial: serial)
                 var resolved: ShadowCompactNode?
-                if let t = textQ, let n = await manager.findNode(byText: t) {
+                if let t = textQ, idQ == nil, descQ == nil, let n = await manager.findNode(byText: t) {
                     resolved = n.toCompactNode()
-                } else if let rid = idQ, let n = await manager.findNode(byResourceID: rid) {
+                } else if let rid = idQ, textQ == nil, descQ == nil, let n = await manager.findNode(byResourceID: rid) {
                     resolved = n.toCompactNode()
-                } else if let desc = descQ, let n = await manager.findNode(byContentDesc: desc) {
+                } else if let desc = descQ, textQ == nil, idQ == nil, let n = await manager.findNode(byContentDesc: desc) {
                     resolved = n.toCompactNode()
+                } else if let liveNodes = await manager.fastCompactTreeIfFresh(maxWaitSeconds: 0.25, maxAgeSeconds: 15.0) {
+                    resolved = liveNodes.first(where: { node in
+                        if let t = textQ?.lowercased(), !node.text.lowercased().contains(t) { return false }
+                        if let rid = idQ?.lowercased(), !node.resource_id.lowercased().contains(rid) { return false }
+                        if let desc = descQ?.lowercased(), !node.content_desc.lowercased().contains(desc) { return false }
+                        return true
+                    })
                 }
 
                 if resolved == nil {
                     let xml = try await fetchFallbackUIXML(serial: serial)
                     let nodes = DroidPathUITreeFallbackParser.parse(xmlString: xml)
                     resolved = nodes.first(where: { node in
-                        if let t = textQ?.lowercased(), node.text.lowercased().contains(t) { return true }
-                        if let rid = idQ?.lowercased(), node.resource_id.lowercased().contains(rid) { return true }
-                        if let desc = descQ?.lowercased(), node.content_desc.lowercased().contains(desc) { return true }
-                        return false
+                        if let t = textQ?.lowercased(), !node.text.lowercased().contains(t) { return false }
+                        if let rid = idQ?.lowercased(), !node.resource_id.lowercased().contains(rid) { return false }
+                        if let desc = descQ?.lowercased(), !node.content_desc.lowercased().contains(desc) { return false }
+                        return true
                     })
                 }
 
@@ -556,19 +564,39 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
                 guard let text = arguments["text"]?.stringValue, !text.isEmpty else {
                     return .text("Missing 'text' parameter.", isError: true)
                 }
+                let pressEnter = arguments["press_enter"]?.boolValue ?? false
                 let serial = try await adbRunner.resolveTargetSerial(arguments["device_serial"]?.stringValue)
-                let escaped = text.replacingOccurrences(of: " ", with: "%s")
-                _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "input", "text", escaped], timeoutSeconds: 5.0)
-                return .text("Typed text.", isError: false)
+                await manager.ensureStarted(serial: serial)
+                await manager.recordAction(AttributedUIAction(
+                    kind: .typeText,
+                    targetDescription: String(text.prefix(32)),
+                    textInput: text,
+                    pressEnter: pressEnter
+                ))
+                let cmd = Self.buildSafeTypeTextCommand(text)
+                if !cmd.useClipboard {
+                    _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "input", "text", cmd.quotedArg], timeoutSeconds: 5.0)
+                } else {
+                    _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "cmd", "clipboard", "set", "text", cmd.quotedArg], timeoutSeconds: 4.0)
+                    _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "input", "keyevent", "279"], timeoutSeconds: 4.0)
+                }
+                if pressEnter {
+                    _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "input", "keyevent", "66"], timeoutSeconds: 4.0)
+                }
+                return .text("Typed \(text.count) characters\(pressEnter ? " + ENTER" : "").", isError: false)
 
             case "android_keyevent":
                 guard let raw = arguments["keycode"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
                     return .text("Missing 'keycode' parameter.", isError: true)
                 }
-                let normalized = raw.uppercased().hasPrefix("KEYCODE_") ? raw.uppercased() : (Int(raw) != nil ? raw : "KEYCODE_\(raw.uppercased())")
+                guard let keyCode = DroidPathActionExecutor.resolveKeyCode(raw) else {
+                    return .text("Unsupported or invalid keyevent '\(raw)'.", isError: true)
+                }
                 let serial = try await adbRunner.resolveTargetSerial(arguments["device_serial"]?.stringValue)
-                _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "input", "keyevent", normalized], timeoutSeconds: 4.0)
-                return .text("Sent keyevent \(normalized).", isError: false)
+                await manager.ensureStarted(serial: serial)
+                await manager.recordAction(AttributedUIAction(kind: .keyevent, targetDescription: raw.uppercased()))
+                _ = try await adbRunner.execute(arguments: ["-s", serial, "shell", "input", "keyevent", keyCode], timeoutSeconds: 4.0)
+                return .text("Sent keyevent \(raw.uppercased()) (\(keyCode)).", isError: false)
 
             default:
                 return .text("Unknown tool '\(name)'.", isError: true)
@@ -590,6 +618,19 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
     }
 
     // MARK: - Formatting Helpers
+
+    public static func buildSafeTypeTextCommand(_ rawText: String) -> (useClipboard: Bool, quotedArg: String) {
+        let sanitized = rawText.replacingOccurrences(of: "\0", with: "")
+        let isSimpleASCII = sanitized.unicodeScalars.allSatisfy { scalar in
+            scalar.isASCII && scalar.value >= 0x20 && scalar.value != 0x7F
+        }
+        if isSimpleASCII {
+            let spaceEncoded = sanitized.replacingOccurrences(of: " ", with: "%s")
+            return (false, DroidPathADBRunner.shellQuote(spaceEncoded))
+        } else {
+            return (true, DroidPathADBRunner.shellQuote(sanitized))
+        }
+    }
 
     public static func hex(_ hash: UInt64) -> String {
         String(format: "0x%016llx", hash)

@@ -24,30 +24,40 @@ func parseArgs(_ args: [String]) -> CLIConfig {
         case "--http":
             cfg.mode = "http"
         case "--port":
-            if i + 1 < args.count, let p = UInt16(args[i + 1]) {
-                cfg.port = p
-                i += 1
+            guard i + 1 < args.count, let p = UInt16(args[i + 1]), p > 0 else {
+                DroidPathManager.logStderr("Invalid value for --port")
+                exit(2)
             }
+            cfg.port = p
+            i += 1
         case "--daemon-port":
-            if i + 1 < args.count, let p = UInt16(args[i + 1]) {
-                cfg.daemonPort = p
-                i += 1
+            guard i + 1 < args.count, let p = UInt16(args[i + 1]), p > 0 else {
+                DroidPathManager.logStderr("Invalid value for --daemon-port")
+                exit(2)
             }
+            cfg.daemonPort = p
+            i += 1
         case "--graph-path":
-            if i + 1 < args.count {
-                cfg.graphPath = URL(fileURLWithPath: args[i + 1])
-                i += 1
+            guard i + 1 < args.count else {
+                DroidPathManager.logStderr("Missing value for --graph-path")
+                exit(2)
             }
+            cfg.graphPath = URL(fileURLWithPath: args[i + 1])
+            i += 1
         case "--daemon-jar":
-            if i + 1 < args.count {
-                cfg.daemonJarPath = args[i + 1]
-                i += 1
+            guard i + 1 < args.count else {
+                DroidPathManager.logStderr("Missing value for --daemon-jar")
+                exit(2)
             }
+            cfg.daemonJarPath = args[i + 1]
+            i += 1
         case "--auth-token":
-            if i + 1 < args.count {
-                cfg.authToken = args[i + 1]
-                i += 1
+            guard i + 1 < args.count else {
+                DroidPathManager.logStderr("Missing value for --auth-token")
+                exit(2)
             }
+            cfg.authToken = args[i + 1]
+            i += 1
         case "-h", "--help":
             cfg.showHelp = true
         case "-v", "--version":
@@ -98,7 +108,34 @@ let manager = DroidPathManager(
 let serverCore = DroidPathMCPServerCore(manager: manager)
 
 if cfg.mode == "http" {
+    let loadSem = DispatchSemaphore(value: 0)
+    Task {
+        await manager.loadPersistedGraphIfNeeded()
+        loadSem.signal()
+    }
+    loadSem.wait()
+
     let http = DroidPathHTTPServer(server: serverCore)
+    signal(SIGINT, SIG_IGN)
+    signal(SIGTERM, SIG_IGN)
+    let sigQueue = DispatchQueue(label: "com.droidpath.mcp.signals")
+    let sigInt = DispatchSource.makeSignalSource(signal: SIGINT, queue: sigQueue)
+    let sigTerm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: sigQueue)
+    let shutdown: @Sendable () -> Void = {
+        http.stop()
+        let sem = DispatchSemaphore(value: 0)
+        Task.detached {
+            await manager.stop()
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 2.5)
+        exit(0)
+    }
+    sigInt.setEventHandler(handler: shutdown)
+    sigTerm.setEventHandler(handler: shutdown)
+    sigInt.resume()
+    sigTerm.resume()
+
     do {
         try http.start(port: cfg.port, requireAuthToken: cfg.authToken)
         RunLoop.main.run()

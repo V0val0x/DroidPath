@@ -511,7 +511,13 @@ public struct DroidPathActionExecutor: MacroActionExecutor {
             )
 
         case .keyevent:
-            let keyCode = Self.resolveKeyCode(action.targetDescription) ?? action.targetDescription
+            guard let keyCode = Self.resolveKeyCode(action.targetDescription) else {
+                throw PathDeviationError.actionDispatchFailed(
+                    stepIndex: -1,
+                    actionSignature: action.signature,
+                    underlyingMessage: "Unsupported or unsafe keyevent '\(action.targetDescription)'."
+                )
+            }
             _ = try await adbRunner.execute(
                 arguments: ["-s", serial, "shell", "input", "keyevent", keyCode],
                 timeoutSeconds: 4.0
@@ -526,11 +532,22 @@ public struct DroidPathActionExecutor: MacroActionExecutor {
                     underlyingMessage: "Missing textInput payload."
                 )
             }
-            let escaped = text.replacingOccurrences(of: " ", with: "%s")
-            _ = try await adbRunner.execute(
-                arguments: ["-s", serial, "shell", "input", "text", escaped],
-                timeoutSeconds: 5.0
-            )
+            let cmd = DroidPathMCPServerCore.buildSafeTypeTextCommand(text)
+            if !cmd.useClipboard {
+                _ = try await adbRunner.execute(
+                    arguments: ["-s", serial, "shell", "input", "text", cmd.quotedArg],
+                    timeoutSeconds: 5.0
+                )
+            } else {
+                _ = try await adbRunner.execute(
+                    arguments: ["-s", serial, "shell", "cmd", "clipboard", "set", "text", cmd.quotedArg],
+                    timeoutSeconds: 4.0
+                )
+                _ = try await adbRunner.execute(
+                    arguments: ["-s", serial, "shell", "input", "keyevent", "279"],
+                    timeoutSeconds: 4.0
+                )
+            }
             if action.pressEnter == true {
                 _ = try await adbRunner.execute(
                     arguments: ["-s", serial, "shell", "input", "keyevent", "66"],
@@ -540,6 +557,13 @@ public struct DroidPathActionExecutor: MacroActionExecutor {
 
         case .launchApp:
             let pkg = action.targetDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard DroidPathADBRunner.validatePackageName(pkg) else {
+                throw PathDeviationError.actionDispatchFailed(
+                    stepIndex: -1,
+                    actionSignature: action.signature,
+                    underlyingMessage: "Invalid package name '\(pkg)'."
+                )
+            }
             _ = try await adbRunner.execute(
                 arguments: ["-s", serial, "shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
                 timeoutSeconds: 6.0
@@ -547,12 +571,17 @@ public struct DroidPathActionExecutor: MacroActionExecutor {
         }
     }
 
-    private static func resolveKeyCode(_ raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        if !trimmed.isEmpty, trimmed.allSatisfy(\.isNumber) { return trimmed }
+    public static func resolveKeyCode(_ raw: String) -> String? {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if trimmed.hasPrefix("KEYCODE_") {
+            trimmed = String(trimmed.dropFirst("KEYCODE_".count))
+        }
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.allSatisfy(\.isNumber) { return trimmed }
         let map: [String: String] = [
-            "BACK": "4", "HOME": "3", "RECENTS": "187", "ENTER": "66",
-            "DELETE": "67", "VOLUME_UP": "24", "VOLUME_DOWN": "25", "WAKEUP": "224"
+            "BACK": "4", "HOME": "3", "RECENTS": "187", "APP_SWITCH": "187",
+            "ENTER": "66", "DELETE": "67", "VOLUME_UP": "24", "VOLUME_DOWN": "25",
+            "POWER": "26", "WAKEUP": "224", "NOTIFICATION": "83", "PASTE": "279"
         ]
         return map[trimmed]
     }
