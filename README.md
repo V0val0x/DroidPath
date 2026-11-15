@@ -50,7 +50,7 @@ flowchart LR
 
 3. **Layer 3 — Persistent A\* Symbolic Router & Standalone MCP Bridge (`DroidPathBridge` + `droidpath-mcp`):**
    - `AStarPathfinder` + `BinaryHeapPriorityQueue` computes minimum-cost multi-hop routes to any target text, `resource-id`, package, or canonical layout hash.
-   - `MacroExecutionEngine` dispatches each tap/swipe over ADB, waits for exact or canonical Shadow DOM confirmation per hop, and raises structured `PathDeviationError` diagnostics on unexpected popups or screen timeouts.
+   - `MacroExecutionEngine` dispatches each tap/swipe over ADB, waits for exact or canonical Shadow DOM confirmation per hop (including post-swipe `RecyclerView` fling quiescence before resolving downstream bounds), and raises structured `PathDeviationError` diagnostics on unexpected popups or screen timeouts.
 
 ---
 
@@ -61,7 +61,7 @@ Prompt: *"Navigate to Night Light"* from Launcher Home Screen:
 | Metric | Traditional VLM Screenshot Loop | **DroidPath A\* Router** |
 | :--- | :---: | :---: |
 | **Intermediate LLM Roundtrips** | 4–5 vision inference calls | **0 calls** |
-| **Total End-to-End Latency** | ~12,000–25,000 ms | **1,863 ms** (4 hops) |
+| **Total End-to-End Latency** | ~12,000–25,000 ms | **1,683 ms** (4 hops) |
 | **State Feedback** | Full PNG screenshots (`screencap`) | Sub-ms Shadow DOM NDJSON frames |
 
 | Standalone Agentic HUD Execution |
