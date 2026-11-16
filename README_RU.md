@@ -68,6 +68,16 @@ flowchart LR
 | :---: |
 | ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
 
+## Comparison with Alternatives
+
+Существующие решения используют stateless ADB-биндинги, что даёт 2–4 секунды задержки на каждое действие и заставляет LLM микроменеджить интерфейс. DroidPath (и [AndOnMac](https://github.com/V0val0x/AndOnMac)) использует персистентный направленный ациклический граф (DAG) и A*-маршрутизацию на macOS, снижая latency до `<1s` на клик и полностью снимая нагрузку с LLM при навигации по известным маршрутам.
+
+| Инструмент | Подход к автоматизации | Задержка на шаг | Нагрузка на LLM |
+| :--- | :--- | :---: | :--- |
+| **Mobile MCP / Maestro MCP / adbridge** | Stateless-обёртки над ADB / `uiautomator` | 2–4 с | LLM планирует каждый клик и свайп |
+| **Appium / CursorTouch** | WebDriver-сессии или циклы по скриншотам | 2–5 с | Частые запросы к модели и опрос DOM |
+| **DroidPath (+ AndOnMac)** | Персистентный DAG + A*-роутер + Shadow DOM демон | `<1s` / шаг | `0` промежуточных вызовов на известных маршрутах |
+
 ---
 
 ## Быстрый старт

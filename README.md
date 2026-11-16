@@ -68,6 +68,16 @@ Prompt: *"Navigate to Night Light"* from Launcher Home Screen:
 | :---: |
 | ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
 
+## Comparison with Alternatives
+
+Existing solutions rely on stateless ADB bindings, adding 2–4 seconds of latency per action and forcing the LLM to micromanage the UI step by step. DroidPath (and [AndOnMac](https://github.com/V0val0x/AndOnMac)) uses a persistent Directed Acyclic Graph (DAG) and A* routing on macOS, cutting latency to `<1s` per click and removing LLM overhead on known routes.
+
+| Tool | UI & Automation Model | Latency / Action | LLM Overhead |
+| :--- | :--- | :---: | :--- |
+| **Mobile MCP / Maestro MCP / adbridge** | Stateless ADB / `uiautomator` wrappers | 2–4 s | LLM plans every tap/scroll |
+| **Appium / CursorTouch** | WebDriver sessions or screenshot/coordinate loops | 2–5 s | Heavy screenshot / selector polling |
+| **DroidPath (+ AndOnMac)** | Persistent DAG + A* router + live Shadow DOM daemon | `<1s` / hop | `0` intermediate calls on known routes |
+
 ---
 
 ## Quick Start
