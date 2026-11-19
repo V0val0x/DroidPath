@@ -7,7 +7,7 @@ use crate::adb::DroidPathAdbRunner;
 use crate::bridge::{ExploreOutcome, ShadowNavigationOutcome};
 use crate::manager::DroidPathManager;
 use crate::protocol::ShadowCompactNode;
-use crate::router::PathDeviationError;
+use crate::router::{MacroActionExecutor, PathDeviationError};
 use crate::spatial_graph::AttributedUIAction;
 
 use super::xml_fallback::DroidPathUITreeFallbackParser;
@@ -524,10 +524,9 @@ impl DroidPathMcpServerCore {
                         AttributedUIAction::tap(format!("({x},{y})"), Some(x), Some(y))
                     };
                     self.manager.record_action(attributed).await;
-                    let xs = x.to_string();
-                    let ys = y.to_string();
-                    self.adb_runner
-                        .execute(&["-s", &serial, "shell", "input", "tap", &xs, &ys], 5.0)
+                    self.manager
+                        .action_executor()
+                        .dispatch_tap(&serial, x, y)
                         .await
                         .map_err(|e| e.to_string())?;
                     return Ok(McpToolResult::text(format!("Tapped at ({x}, {y})."), false));
@@ -599,10 +598,9 @@ impl DroidPathMcpServerCore {
                     (!m.content_desc.is_empty()).then(|| m.content_desc.clone());
                 self.manager.record_action(act).await;
 
-                let xs = m.center_x.to_string();
-                let ys = m.center_y.to_string();
-                self.adb_runner
-                    .execute(&["-s", &serial, "shell", "input", "tap", &xs, &ys], 5.0)
+                self.manager
+                    .action_executor()
+                    .dispatch_tap(&serial, m.center_x, m.center_y)
                     .await
                     .map_err(|e| e.to_string())?;
                 let display_name = if !m.text.is_empty() {
@@ -625,13 +623,21 @@ impl DroidPathMcpServerCore {
                         true,
                     ));
                 };
-                let duration = get_i32("duration_ms").unwrap_or(300).clamp(50, 5000);
+                let duration_opt = get_i32("duration_ms").map(|d| d.clamp(50, 5000));
                 let serial = self
                     .adb_runner
                     .resolve_target_serial(get_str("device_serial"))
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
+                let executor = self.manager.action_executor();
+                let effective_dur = duration_opt.unwrap_or(
+                    if executor.supports_zero_fling_swipes(&serial).await {
+                        crate::adb::DroidPathActionExecutor::DEFAULT_DAEMON_SWIPE_DURATION_MS
+                    } else {
+                        300
+                    },
+                );
                 self.manager
                     .record_action(AttributedUIAction::swipe(
                         format!("swipe ({x1},{y1})->({x2},{y2})"),
@@ -639,27 +645,23 @@ impl DroidPathMcpServerCore {
                         y1,
                         x2,
                         y2,
-                        Some(duration),
+                        Some(effective_dur),
                     ))
                     .await;
-                let (x1s, y1s, x2s, y2s, ds) = (
-                    x1.to_string(),
-                    y1.to_string(),
-                    x2.to_string(),
-                    y2.to_string(),
-                    duration.to_string(),
-                );
-                self.adb_runner
-                    .execute(
-                        &[
-                            "-s", &serial, "shell", "input", "swipe", &x1s, &y1s, &x2s, &y2s, &ds,
-                        ],
-                        6.0,
+                executor
+                    .dispatch_swipe(
+                        &serial,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        Some(effective_dur),
+                        crate::adb::DroidPathActionExecutor::DEFAULT_ZERO_FLING_HOLD_MS,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(McpToolResult::text(
-                    format!("Swiped ({x1},{y1}) -> ({x2},{y2}) in {duration}ms."),
+                    format!("Swiped ({x1},{y1}) -> ({x2},{y2}) in {effective_dur}ms."),
                     false,
                 ))
             }
@@ -693,14 +695,16 @@ impl DroidPathMcpServerCore {
                         )
                         .await
                         .map_err(|e| e.to_string())?;
-                    self.adb_runner
-                        .execute(&["-s", &serial, "shell", "input", "keyevent", "279"], 4.0)
+                    self.manager
+                        .action_executor()
+                        .dispatch_keyevent_code(&serial, "279")
                         .await
                         .map_err(|e| e.to_string())?;
                 }
                 if press_enter {
-                    self.adb_runner
-                        .execute(&["-s", &serial, "shell", "input", "keyevent", "66"], 4.0)
+                    self.manager
+                        .action_executor()
+                        .dispatch_keyevent_code(&serial, "66")
                         .await
                         .map_err(|e| e.to_string())?;
                 }
@@ -733,8 +737,9 @@ impl DroidPathMcpServerCore {
                 self.manager
                     .record_action(AttributedUIAction::keyevent(raw.to_uppercase()))
                     .await;
-                self.adb_runner
-                    .execute(&["-s", &serial, "shell", "input", "keyevent", &key_code], 4.0)
+                self.manager
+                    .action_executor()
+                    .dispatch_keyevent_code(&serial, &key_code)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(McpToolResult::text(

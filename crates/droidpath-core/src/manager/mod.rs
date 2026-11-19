@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -234,7 +234,6 @@ impl DroidPathPersistenceCoordinator {
 }
 
 struct ManagerState {
-    active_serial: Option<String>,
     has_started: bool,
 }
 
@@ -246,6 +245,7 @@ pub struct DroidPathManager {
     persistence: Arc<DroidPathPersistenceCoordinator>,
     lifecycle_gate: Mutex<()>,
     state: Mutex<ManagerState>,
+    active_serial: Arc<RwLock<Option<String>>>,
     explicit_daemon_jar_path: Option<PathBuf>,
     adb_runner: DroidPathAdbRunner,
     port_forwarder: Option<PortForwarderHook>,
@@ -270,10 +270,8 @@ impl DroidPathManager {
             bridge: Arc::clone(&bridge),
             persistence: Arc::new(DroidPathPersistenceCoordinator::new(storage_path)),
             lifecycle_gate: Mutex::new(()),
-            state: Mutex::new(ManagerState {
-                active_serial: None,
-                has_started: false,
-            }),
+            state: Mutex::new(ManagerState { has_started: false }),
+            active_serial: Arc::new(RwLock::new(None)),
             explicit_daemon_jar_path: daemon_jar_path,
             adb_runner,
             port_forwarder,
@@ -299,12 +297,20 @@ impl DroidPathManager {
         &self.adb_runner
     }
 
+    pub fn action_executor(&self) -> Arc<DroidPathActionExecutor> {
+        Arc::new(DroidPathActionExecutor::with_daemon(
+            self.adb_runner.clone(),
+            Arc::clone(&self.bridge.client),
+            Some(Arc::clone(&self.active_serial)),
+        ))
+    }
+
     pub fn storage_path(&self) -> &Path {
         self.persistence.path()
     }
 
     pub async fn active_serial(&self) -> Option<String> {
-        self.state.lock().await.active_serial.clone()
+        self.active_serial.read().await.clone()
     }
 
     pub async fn load_persisted_graph_if_needed(&self) {
@@ -331,9 +337,10 @@ impl DroidPathManager {
 
         let (should_configure_and_start, serial_changed, acquired_initial_serial) = {
             let mut st = self.state.lock().await;
-            let prev = st.active_serial.clone();
+            let mut active = self.active_serial.write().await;
+            let prev = active.clone();
             if let Some(ref vs) = valid_serial {
-                st.active_serial = Some(vs.clone());
+                *active = Some(vs.clone());
             }
             if !st.has_started {
                 st.has_started = true;
@@ -505,8 +512,8 @@ impl DroidPathManager {
     ) -> Result<ShadowNavigationOutcome, PathDeviationError> {
         self.load_persisted_graph_if_needed().await;
         self.ensure_started(Some(serial), true).await;
-        let active_executor = executor
-            .unwrap_or_else(|| Arc::new(DroidPathActionExecutor::new(self.adb_runner.clone())));
+        let active_executor =
+            executor.unwrap_or_else(|| self.action_executor() as Arc<dyn MacroActionExecutor>);
         let outcome = self
             .bridge
             .route_and_execute(
@@ -547,8 +554,8 @@ impl DroidPathManager {
     ) -> Result<ExploreOutcome, PathDeviationError> {
         self.load_persisted_graph_if_needed().await;
         self.ensure_started(Some(serial), true).await;
-        let active_executor = executor
-            .unwrap_or_else(|| Arc::new(DroidPathActionExecutor::new(self.adb_runner.clone())));
+        let active_executor =
+            executor.unwrap_or_else(|| self.action_executor() as Arc<dyn MacroActionExecutor>);
         let outcome = self
             .bridge
             .explore_and_click(
@@ -578,7 +585,7 @@ impl DroidPathManager {
     pub async fn forward_daemon_port(&self, port: u16, explicit_serial: Option<&str>) {
         let target_serial = match explicit_serial {
             Some(s) => Some(s.to_string()),
-            None => self.state.lock().await.active_serial.clone(),
+            None => self.active_serial.read().await.clone(),
         };
         if let Some(ref forwarder) = self.port_forwarder {
             forwarder(target_serial, port).await;

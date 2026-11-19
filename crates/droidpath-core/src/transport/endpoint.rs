@@ -88,4 +88,10 @@ pub enum DaemonClientError {
     Stopped,
     #[error("Failed to send command to daemon: {0}")]
     SendFailed(String),
+    #[error("Connected daemon does not support native input injection")]
+    NotSupported,
+    #[error("Native daemon input injection failed: {0}")]
+    InputFailed(String),
+    #[error("Timed out awaiting native daemon input acknowledgement")]
+    InputTimeout,
 }

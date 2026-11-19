@@ -27,6 +27,13 @@ struct SettleTarget {
     expected_vertex: Option<ScreenStateVertex>,
 }
 
+#[derive(Clone, Copy)]
+struct StepSettleContext {
+    step_index: usize,
+    from_hash: u64,
+    is_intermediate_scroll: bool,
+}
+
 enum SettleOutcome {
     Settled {
         matched_step_index: usize,
@@ -400,9 +407,15 @@ impl MacroExecutionEngine {
             });
 
             let step_start = Instant::now();
+            let settle_ctx = StepSettleContext {
+                step_index,
+                from_hash: last_settled_hash,
+                is_intermediate_scroll: resolved_action.kind == UIActionKind::Swipe
+                    && step_index + 1 < path.len(),
+            };
             let settle_res = self
                 .execute_and_wait_for_settle(
-                    step_index,
+                    settle_ctx,
                     &resolved_action,
                     serial,
                     &suffix_targets,
@@ -515,14 +528,22 @@ impl MacroExecutionEngine {
             step_index = matched_idx + 1;
 
             if step_index < path.len() && self.configuration.post_settle_quiescence_ms > 0 {
-                // Wait for 120Hz RecyclerView fling deceleration before a subsequent tap so Android
-                // reaches SCROLL_STATE_IDLE instead of swallowing the tap as a fling-brake touch.
+                // When native zero-fling daemon injection is active, ease-out + terminal hold
+                // stops RecyclerView at SCROLL_STATE_IDLE immediately (~0px drift), so tight
+                // quiescence (45-70ms) suffices. Keep conservative 280/480ms waits on ADB fallback.
                 let next_is_swipe = path[step_index]
                     .action
                     .as_ref()
                     .is_some_and(|a| a.kind == UIActionKind::Swipe);
                 let quiescence_ms = if resolved_action.kind == UIActionKind::Swipe {
-                    let min_wait = if next_is_swipe { 280 } else { 480 };
+                    let zero_fling = self.executor.supports_zero_fling_swipes(serial).await;
+                    let min_wait = if zero_fling {
+                        if next_is_swipe { 60 } else { 85 }
+                    } else if next_is_swipe {
+                        280
+                    } else {
+                        480
+                    };
                     self.configuration.post_settle_quiescence_ms.max(min_wait)
                 } else {
                     self.configuration.post_settle_quiescence_ms
@@ -648,13 +669,14 @@ impl MacroExecutionEngine {
 
     async fn execute_and_wait_for_settle(
         &self,
-        step_index: usize,
+        ctx: StepSettleContext,
         action: &AttributedUIAction,
         serial: &str,
         targets: &[SettleTarget],
         mut update_rx: broadcast::Receiver<ShadowDOMUpdate>,
         mut secure_rx: broadcast::Receiver<WireSecureScreenPayload>,
     ) -> Result<SettleOutcome, PathDeviationError> {
+        let step_index = ctx.step_index;
         let primary_target_hash = targets.last().map(|t| t.target_hash).unwrap_or(0);
         let timeout_ms = self.configuration.step_timeout_ms.max(50);
         let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
@@ -697,11 +719,23 @@ impl MacroExecutionEngine {
                             }
                             let fp = self.hasher.fingerprint(&update.index);
                             for target in targets {
+                                // Intermediate scroll steps can shift by ±1 list row (~20px),
+                                // dropping Jaccard just under 0.80 (e.g. 0.785) even though the
+                                // scrolled viewport is on-track and the next tap live-retargets.
+                                let eff_threshold = if ctx.is_intermediate_scroll
+                                    && target.step_index == step_index
+                                    && self.configuration.settle_similarity_threshold < 1.0
+                                    && fp.layout_hash != ctx.from_hash
+                                {
+                                    self.configuration.settle_similarity_threshold.min(0.65)
+                                } else {
+                                    self.configuration.settle_similarity_threshold
+                                };
                                 let (matched, exact) = Self::matches_vertex(
                                     &fp,
                                     target.target_hash,
                                     target.expected_vertex.as_ref(),
-                                    self.configuration.settle_similarity_threshold,
+                                    eff_threshold,
                                 );
                                 if matched {
                                     settled_outcome = Some((target.step_index, fp.layout_hash, exact));
@@ -900,6 +934,43 @@ impl MacroExecutionEngine {
         union_rect
     }
 
+    /// Returns `true` if `node` is a vertically scrollable container suitable for list scrolling
+    /// (excluding ignored system overlays, horizontal pagers, and launcher home-screen workspaces).
+    fn is_vertical_scroll_container(
+        node: &ShadowUINode,
+        skip_ignored: bool,
+        ignored_packages: &HashSet<String>,
+    ) -> bool {
+        if !node.visible || !node.scrollable {
+            return false;
+        }
+        if skip_ignored
+            && (!node.package_name.is_empty() && ignored_packages.contains(&node.package_name)
+                || ignored_packages
+                    .iter()
+                    .any(|pkg| node.resource_id.starts_with(&format!("{pkg}:"))))
+        {
+            return false;
+        }
+        // Skip horizontal-only pagers and launcher home-screen workspaces where a vertical
+        // downward swipe pulls down the Android Notification Shade instead of scrolling a list.
+        let cls_lower = node.class_name.to_lowercase();
+        if cls_lower.contains("horizontalscrollview") || cls_lower.contains("viewpager") {
+            return false;
+        }
+        let rid_lower = node.resource_id.to_lowercase();
+        if rid_lower.ends_with(":id/workspace")
+            || rid_lower.ends_with("/workspace")
+            || rid_lower.ends_with(":id/hotseat")
+            || rid_lower.ends_with("/hotseat")
+            || rid_lower.ends_with(":id/smartspace_card_pager")
+            || rid_lower.ends_with("/smartspace_card_pager")
+        {
+            return false;
+        }
+        true
+    }
+
     /// Finds the largest visible non-system `scrollable` container bounds on screen.
     pub fn largest_scrollable_rect(
         index: &ShadowTreeIndex,
@@ -909,31 +980,7 @@ impl MacroExecutionEngine {
         let mut best: Option<BoundsRect> = None;
 
         for node in &index.ordered_nodes {
-            if !node.visible || !node.scrollable {
-                continue;
-            }
-            if skip_ignored
-                && (!node.package_name.is_empty() && ignored_packages.contains(&node.package_name)
-                    || ignored_packages
-                        .iter()
-                        .any(|pkg| node.resource_id.starts_with(&format!("{pkg}:"))))
-            {
-                continue;
-            }
-            // Skip horizontal-only pagers and launcher home-screen workspaces where a vertical
-            // downward swipe pulls down the Android Notification Shade instead of scrolling a list.
-            let cls_lower = node.class_name.to_lowercase();
-            if cls_lower.contains("horizontalscrollview") || cls_lower.contains("viewpager") {
-                continue;
-            }
-            let rid_lower = node.resource_id.to_lowercase();
-            if rid_lower.ends_with(":id/workspace")
-                || rid_lower.ends_with("/workspace")
-                || rid_lower.ends_with(":id/hotseat")
-                || rid_lower.ends_with("/hotseat")
-                || rid_lower.ends_with(":id/smartspace_card_pager")
-                || rid_lower.ends_with("/smartspace_card_pager")
-            {
+            if !Self::is_vertical_scroll_container(node, skip_ignored, ignored_packages) {
                 continue;
             }
             let Some(rect) = ShadowTreeIndex::parse_bounds_rect(&node.bounds) else {
@@ -949,6 +996,50 @@ impl MacroExecutionEngine {
             }
         }
         best
+    }
+
+    /// Returns `true` if `node`'s tap center `(center_x, center_y)` is clipped outside (or within
+    /// the razor edge inset of) a vertically scrollable ancestor container — e.g. a `RecyclerView`
+    /// row peeking behind Android's bottom gesture navigation bar (`center_y > recycler.max_y`)
+    /// that Accessibility still reports `visible: true`.
+    pub fn is_node_clipped_by_scrollable_ancestor(
+        index: &ShadowTreeIndex,
+        node: &ShadowUINode,
+        ignored_packages: &HashSet<String>,
+    ) -> bool {
+        let skip_ignored = !ignored_packages.contains(&index.active_package);
+        let mut cursor = node.parent_id;
+        let mut hops = 0usize;
+        let mut visited = HashSet::new();
+        visited.insert(node.node_id);
+
+        while let Some(pid) = cursor {
+            if hops >= 16 || !visited.insert(pid) {
+                break;
+            }
+            let Some(parent) = index.nodes_by_id.get(&pid) else {
+                break;
+            };
+            if Self::is_vertical_scroll_container(parent, skip_ignored, ignored_packages) {
+                if let Some(rect) = ShadowTreeIndex::parse_bounds_rect(&parent.bounds) {
+                    let height = rect.max_y - rect.min_y;
+                    let width = rect.max_x - rect.min_x;
+                    if width >= 120 && height >= 120 {
+                        let margin = if height >= 200 {
+                            (height / 100).clamp(8, 16)
+                        } else {
+                            0
+                        };
+                        if node.center_y > rect.max_y - margin || node.center_y < rect.min_y + margin {
+                            return true;
+                        }
+                    }
+                }
+            }
+            cursor = parent.parent_id;
+            hops += 1;
+        }
+        false
     }
 
     /// Extracts an ordered signature of visible labeled items inside `container` to detect scroll movement vs list boundaries.
@@ -1079,10 +1170,16 @@ impl MacroExecutionEngine {
             &self.hasher.ignored_packages,
         );
 
+        let zero_fling = self.executor.supports_zero_fling_swipes(serial).await;
         let cx = ((scroll_rect.min_x + scroll_rect.max_x) / 2).max(1);
         let span_y = scroll_rect.max_y - scroll_rect.min_y;
-        let y_high = scroll_rect.min_y + (span_y * 72) / 100;
-        let y_low = scroll_rect.min_y + (span_y * 28) / 100;
+        let (high_pct, low_pct, swipe_dur_ms) = if zero_fling {
+            (80, 18, 145)
+        } else {
+            (72, 28, 500)
+        };
+        let y_high = scroll_rect.min_y + (span_y * high_pct) / 100;
+        let y_low = scroll_rect.min_y + (span_y * low_pct) / 100;
         let (start_y, end_y, dir_label) = if scrolling_down {
             (y_high, y_low, "down")
         } else {
@@ -1095,7 +1192,7 @@ impl MacroExecutionEngine {
             start_y,
             cx,
             end_y,
-            Some(500),
+            Some(swipe_dur_ms),
         );
 
         self.emit(MacroExecutionEvent::RecoveryAction {
@@ -1140,8 +1237,34 @@ impl MacroExecutionEngine {
         }
 
         if self.configuration.post_settle_quiescence_ms > 0 {
-            let q_ms = self.configuration.post_settle_quiescence_ms.max(400);
-            tokio::time::sleep(Duration::from_millis(q_ms)).await;
+            if zero_fling {
+                let quiet_ms = self.configuration.post_settle_quiescence_ms.max(115);
+                let max_drain_ms = quiet_ms.max(380);
+                let hard_deadline = tokio::time::sleep(Duration::from_millis(max_drain_ms));
+                let quiet_deadline = tokio::time::sleep(Duration::from_millis(quiet_ms));
+                tokio::pin!(hard_deadline);
+                tokio::pin!(quiet_deadline);
+                loop {
+                    tokio::select! {
+                        _ = &mut hard_deadline => break,
+                        _ = &mut quiet_deadline => break,
+                        res = update_rx.recv() => {
+                            match res {
+                                Ok(upd) if !upd.is_secure_screen_active => {
+                                    quiet_deadline
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::now() + Duration::from_millis(quiet_ms));
+                                }
+                                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }
+                }
+            } else {
+                let q_ms = self.configuration.post_settle_quiescence_ms.max(400);
+                tokio::time::sleep(Duration::from_millis(q_ms)).await;
+            }
         }
 
         let (updated_act, matched) = self.resolve_live_action_with_node(raw_action).await;
@@ -1205,7 +1328,15 @@ impl MacroExecutionEngine {
             .map(|idx| {
                 idx.ordered_nodes
                     .iter()
-                    .filter(|n| n.visible && (n.center_x > 0 || n.center_y > 0))
+                    .filter(|n| {
+                        n.visible
+                            && (n.center_x > 0 || n.center_y > 0)
+                            && !Self::is_node_clipped_by_scrollable_ancestor(
+                                idx,
+                                n,
+                                &self.hasher.ignored_packages,
+                            )
+                    })
                     .collect()
             })
             .unwrap_or_default();

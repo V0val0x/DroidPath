@@ -3,7 +3,8 @@ use thiserror::Error;
 
 use super::wire::{
     DaemonCommand, WireDiffPayload, WireErrorPayload, WireHeartbeatPayload, WireHelloPayload,
-    WireMessage, WirePongPayload, WireSecureScreenPayload, WireSnapshotPayload,
+    WireInputResultPayload, WireMessage, WirePongPayload, WireSecureScreenPayload,
+    WireSnapshotPayload,
 };
 
 #[derive(Debug, Error)]
@@ -14,6 +15,8 @@ pub enum WireCodecError {
     UnknownMessageType(String),
     #[error("Invalid debounce ms: {0} (expected 0..=5000)")]
     InvalidDebounceMs(i32),
+    #[error("Invalid input parameter: {0}")]
+    InvalidInputParameter(String),
     #[error("JSON decode error: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -45,6 +48,7 @@ impl NdjsonWireCodec {
     const PREFIX_HELLO: &'static [u8] = br#"{"type":"hello""#;
     const PREFIX_ERROR: &'static [u8] = br#"{"type":"error""#;
     const PREFIX_SECURE_SCREEN: &'static [u8] = br#"{"type":"secure_screen""#;
+    const PREFIX_INPUT_RESULT: &'static [u8] = br#"{"type":"input_result""#;
 
     pub fn new() -> Self {
         Self
@@ -86,6 +90,9 @@ impl NdjsonWireCodec {
         if Self::matches_prefix(data, Self::PREFIX_SECURE_SCREEN) {
             return Some("secure_screen");
         }
+        if Self::matches_prefix(data, Self::PREFIX_INPUT_RESULT) {
+            return Some("input_result");
+        }
         None
     }
 
@@ -111,6 +118,9 @@ impl NdjsonWireCodec {
             )),
             "secure_screen" => Ok(WireMessage::SecureScreen(serde_json::from_slice::<
                 WireSecureScreenPayload,
+            >(data)?)),
+            "input_result" => Ok(WireMessage::InputResult(serde_json::from_slice::<
+                WireInputResultPayload,
             >(data)?)),
             other => Err(WireCodecError::UnknownMessageType(other.to_string())),
         }
@@ -143,6 +153,54 @@ impl WireCodec for NdjsonWireCodec {
                     return Err(WireCodecError::InvalidDebounceMs(ms));
                 }
                 Ok(format!("{{\"cmd\":\"set_debounce\",\"ms\":{ms}}}\n").into_bytes())
+            }
+            DaemonCommand::Tap { id, x, y } => {
+                if !(0..=16_384).contains(&x) || !(0..=16_384).contains(&y) {
+                    return Err(WireCodecError::InvalidInputParameter(format!(
+                        "tap coords ({x},{y}) out of range 0..=16384"
+                    )));
+                }
+                Ok(format!("{{\"cmd\":\"tap\",\"id\":{id},\"x\":{x},\"y\":{y}}}\n").into_bytes())
+            }
+            DaemonCommand::Swipe {
+                id,
+                x1,
+                y1,
+                x2,
+                y2,
+                duration_ms,
+                hold_ms,
+            } => {
+                if [x1, y1, x2, y2].iter().any(|c| !(0..=16_384).contains(c)) {
+                    return Err(WireCodecError::InvalidInputParameter(format!(
+                        "swipe coords ({x1},{y1})->({x2},{y2}) out of range 0..=16384"
+                    )));
+                }
+                if !(10..=10_000).contains(&duration_ms) {
+                    return Err(WireCodecError::InvalidInputParameter(format!(
+                        "swipe duration_ms {duration_ms} out of range 10..=10000"
+                    )));
+                }
+                if !(0..=1_000).contains(&hold_ms) {
+                    return Err(WireCodecError::InvalidInputParameter(format!(
+                        "swipe hold_ms {hold_ms} out of range 0..=1000"
+                    )));
+                }
+                Ok(format!(
+                    "{{\"cmd\":\"swipe\",\"id\":{id},\"x1\":{x1},\"y1\":{y1},\"x2\":{x2},\"y2\":{y2},\"duration_ms\":{duration_ms},\"hold_ms\":{hold_ms}}}\n"
+                )
+                .into_bytes())
+            }
+            DaemonCommand::Keyevent { id, keycode } => {
+                if !(1..=1024).contains(&keycode) {
+                    return Err(WireCodecError::InvalidInputParameter(format!(
+                        "keycode {keycode} out of range 1..=1024"
+                    )));
+                }
+                Ok(
+                    format!("{{\"cmd\":\"keyevent\",\"id\":{id},\"keycode\":{keycode}}}\n")
+                        .into_bytes(),
+                )
             }
         }
     }

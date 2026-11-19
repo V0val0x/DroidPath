@@ -28,8 +28,8 @@ pub use mcp::{
 pub use protocol::{
     DaemonCommand, NdjsonWireCodec, ShadowCompactNode, ShadowPatchMask, ShadowTreeMatchMode,
     ShadowUINode, WireCodec, WireCodecError, WireDiffPayload, WireErrorPayload,
-    WireHeartbeatPayload, WireHelloPayload, WireMessage, WireNodePatch, WirePongPayload,
-    WireSecureScreenPayload, WireSnapshotPayload,
+    WireHeartbeatPayload, WireHelloPayload, WireInputResultPayload, WireMessage, WireNodePatch,
+    WirePongPayload, WireSecureScreenPayload, WireSnapshotPayload,
 };
 pub use router::{
     AStarCostConfiguration, AStarPathfinder, AStarSearchResult, DismissCandidate,

@@ -7,10 +7,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::router::{MacroActionExecutor, PathDeviationError};
 use crate::spatial_graph::{AttributedUIAction, UIActionKind};
+use crate::transport::DaemonTcpClient;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DroidPathDevice {
@@ -351,16 +352,136 @@ impl DroidPathAdbRunner {
 
 pub struct DroidPathActionExecutor {
     adb_runner: DroidPathAdbRunner,
+    daemon_client: Option<Arc<DaemonTcpClient>>,
+    daemon_active_serial: Option<Arc<RwLock<Option<String>>>>,
 }
 
 impl DroidPathActionExecutor {
+    pub const DEFAULT_DAEMON_SWIPE_DURATION_MS: i32 = 145;
+    pub const DEFAULT_ZERO_FLING_HOLD_MS: i32 = 25;
+
     pub fn new(adb_runner: DroidPathAdbRunner) -> Self {
-        Self { adb_runner }
+        Self {
+            adb_runner,
+            daemon_client: None,
+            daemon_active_serial: None,
+        }
+    }
+
+    pub fn with_daemon(
+        adb_runner: DroidPathAdbRunner,
+        daemon_client: Arc<DaemonTcpClient>,
+        daemon_active_serial: Option<Arc<RwLock<Option<String>>>>,
+    ) -> Self {
+        Self {
+            adb_runner,
+            daemon_client: Some(daemon_client),
+            daemon_active_serial,
+        }
+    }
+
+    async fn daemon_client_for_serial(&self, serial: &str) -> Option<&Arc<DaemonTcpClient>> {
+        let client = self.daemon_client.as_ref()?;
+        if let Some(ref active_serial) = self.daemon_active_serial {
+            let guard = active_serial.read().await;
+            if let Some(ref bound) = *guard {
+                if !bound.is_empty() && bound != serial {
+                    return None;
+                }
+            }
+        }
+        if client.supports_native_input().await {
+            Some(client)
+        } else {
+            None
+        }
+    }
+
+    pub async fn dispatch_tap(
+        &self,
+        serial: &str,
+        x: i32,
+        y: i32,
+    ) -> Result<(), DroidPathAdbError> {
+        if let Some(client) = self.daemon_client_for_serial(serial).await {
+            if client.inject_tap(x, y).await.is_ok() {
+                return Ok(());
+            }
+        }
+        let xs = x.to_string();
+        let ys = y.to_string();
+        self.adb_runner
+            .execute(&["-s", serial, "shell", "input", "tap", &xs, &ys], 5.0)
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_swipe(
+        &self,
+        serial: &str,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        duration_ms: Option<i32>,
+        hold_ms: i32,
+    ) -> Result<(), DroidPathAdbError> {
+        if let Some(client) = self.daemon_client_for_serial(serial).await {
+            let daemon_dur = duration_ms
+                .unwrap_or(Self::DEFAULT_DAEMON_SWIPE_DURATION_MS)
+                .clamp(20, 5000);
+            if client
+                .inject_swipe(x1, y1, x2, y2, daemon_dur, hold_ms.clamp(0, 1000))
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        let dur = duration_ms.unwrap_or(280).max(120).to_string();
+        let (x1s, y1s, x2s, y2s) = (
+            x1.to_string(),
+            y1.to_string(),
+            x2.to_string(),
+            y2.to_string(),
+        );
+        self.adb_runner
+            .execute(
+                &[
+                    "-s", serial, "shell", "input", "swipe", &x1s, &y1s, &x2s, &y2s, &dur,
+                ],
+                6.0,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn dispatch_keyevent_code(
+        &self,
+        serial: &str,
+        key_code: &str,
+    ) -> Result<(), DroidPathAdbError> {
+        if let Ok(kc_num) = key_code.parse::<i32>() {
+            if let Some(client) = self.daemon_client_for_serial(serial).await {
+                if client.inject_keyevent(kc_num).await.is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        self.adb_runner
+            .execute(&["-s", serial, "shell", "input", "keyevent", key_code], 4.0)
+            .await?;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl MacroActionExecutor for DroidPathActionExecutor {
+    async fn supports_zero_fling_swipes(&self, serial: &str) -> bool {
+        self.daemon_client_for_serial(serial).await.is_some()
+    }
+
     async fn execute(
         &self,
         action: &AttributedUIAction,
@@ -382,12 +503,7 @@ impl MacroActionExecutor for DroidPathActionExecutor {
                         underlying_message: "Missing tap coordinates (x, y).".to_string(),
                     });
                 };
-                let xs = x.to_string();
-                let ys = y.to_string();
-                self.adb_runner
-                    .execute(&["-s", serial, "shell", "input", "tap", &xs, &ys], 5.0)
-                    .await
-                    .map_err(map_err)?;
+                self.dispatch_tap(serial, x, y).await.map_err(map_err)?;
             }
 
             UIActionKind::Swipe => {
@@ -400,18 +516,28 @@ impl MacroActionExecutor for DroidPathActionExecutor {
                         underlying_message: "Missing swipe coordinates.".to_string(),
                     });
                 };
-                let dur = action.duration_ms.unwrap_or(280).max(120).to_string();
-                let x1s = x1.to_string();
-                let y1s = y1.to_string();
-                let x2s = x2.to_string();
-                let y2s = y2.to_string();
-                self.adb_runner
-                    .execute(
-                        &[
-                            "-s", serial, "shell", "input", "swipe", &x1s, &y1s, &x2s, &y2s, &dur,
-                        ],
-                        5.0,
+                let is_banner_dismiss = action
+                    .target_description
+                    .starts_with("Dismiss occluding notification");
+                let hold_ms = if is_banner_dismiss {
+                    0
+                } else {
+                    Self::DEFAULT_ZERO_FLING_HOLD_MS
+                };
+                let is_recorded_scroll = action.target_description.starts_with("explore_scroll_")
+                    || action.target_description.starts_with("Smart scroll ");
+                let daemon_ready = self.daemon_client_for_serial(serial).await.is_some();
+                let effective_dur = if daemon_ready && is_recorded_scroll {
+                    Some(
+                        action
+                            .duration_ms
+                            .unwrap_or(Self::DEFAULT_DAEMON_SWIPE_DURATION_MS)
+                            .clamp(50, 155),
                     )
+                } else {
+                    action.duration_ms
+                };
+                self.dispatch_swipe(serial, x1, y1, x2, y2, effective_dur, hold_ms)
                     .await
                     .map_err(map_err)?;
             }
@@ -429,8 +555,7 @@ impl MacroActionExecutor for DroidPathActionExecutor {
                         ),
                     });
                 };
-                self.adb_runner
-                    .execute(&["-s", serial, "shell", "input", "keyevent", &key_code], 4.0)
+                self.dispatch_keyevent_code(serial, &key_code)
                     .await
                     .map_err(map_err)?;
             }
@@ -462,14 +587,12 @@ impl MacroActionExecutor for DroidPathActionExecutor {
                         )
                         .await
                         .map_err(map_err)?;
-                    self.adb_runner
-                        .execute(&["-s", serial, "shell", "input", "keyevent", "279"], 4.0)
+                    self.dispatch_keyevent_code(serial, "279")
                         .await
                         .map_err(map_err)?;
                 }
                 if action.press_enter == Some(true) {
-                    self.adb_runner
-                        .execute(&["-s", serial, "shell", "input", "keyevent", "66"], 4.0)
+                    self.dispatch_keyevent_code(serial, "66")
                         .await
                         .map_err(map_err)?;
                 }

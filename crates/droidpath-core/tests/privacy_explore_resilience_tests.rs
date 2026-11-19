@@ -1353,3 +1353,180 @@ async fn test_scroll_direct_edge_bridging_across_mid_scroll_frames_and_launcher_
     assert_eq!(route.edges.len(), 2, "Expected 2-hop route (scroll -> tap Night Light)");
     assert!(route.edges.iter().all(|e| e.action.is_some()));
 }
+
+#[tokio::test]
+async fn test_clipped_scroll_child_skipped_until_scrolled_and_compacted_noop_tap_reports_unchanged() {
+    // 1. A RecyclerView child peeking behind Android's bottom gesture bar (`center_y = 2418`
+    //    when RecyclerView `max_y = 2361`) must be skipped so explore_and_click scrolls once more
+    //    instead of tapping the navigation gesture bar. Sibling bottom dock items (no scroll
+    //    ancestor) remain clickable.
+    let mut ignored = HashSet::new();
+    ignored.insert("com.android.systemui".to_string());
+
+    let clipped_nodes = vec![
+        mk_node(1, None, 0, "com.android.settings", "RecyclerView", "com.android.settings:id/recycler_view", "", "", "[0,299][1080,2361]", false, true, false),
+        mk_node(2, Some(1), 1, "com.android.settings", "LinearLayout", "", "", "", "[0,2370][1080,2466]", true, false, false),
+        mk_node(3, Some(2), 2, "com.android.settings", "TextView", "android:id/title", "Developer options", "", "[221,2390][593,2446]", false, false, false),
+        mk_node(4, None, 3, "com.android.settings", "Button", "com.android.settings:id/dock_btn", "Bottom Dock", "", "[400,2365][680,2415]", true, false, false),
+    ];
+    let clipped_idx = ShadowTreeIndex::new(1, 1000, "com.android.settings", 1, clipped_nodes.clone());
+    assert!(
+        ShadowGraphBridge::score_live_candidates(&clipped_idx, "Developer options", &ignored).is_empty(),
+        "Clipped RecyclerView child at center_y=2418 (> max_y=2361) must not be scored as tappable"
+    );
+    assert_eq!(
+        ShadowGraphBridge::score_live_candidates(&clipped_idx, "Bottom Dock", &ignored).len(),
+        1,
+        "Non-scroll-child bottom dock button must remain tappable"
+    );
+
+    // End-to-end explore_and_click: scrolls once to reveal Developer options inside viewport, then taps it.
+    let bridge = Arc::new(ShadowGraphBridge::with_default_config());
+    let _ = seed_screen_into_graph(&bridge, 1, "com.android.settings", clipped_nodes).await;
+
+    let centered_nodes = vec![
+        mk_node(1, None, 0, "com.android.settings", "RecyclerView", "com.android.settings:id/recycler_view", "", "", "[0,299][1080,2361]", false, true, false),
+        mk_node(2, Some(1), 1, "com.android.settings", "LinearLayout", "", "", "", "[0,1660][1080,1800]", true, false, false),
+        mk_node(3, Some(2), 2, "com.android.settings", "TextView", "android:id/title", "Developer options", "", "[221,1702][593,1755]", false, false, false),
+    ];
+    let dev_opts_nodes = vec![
+        mk_node(10, None, 0, "com.android.settings", "TextView", "android:id/title", "Use developer options", "", "[80,300][700,420]", true, false, false),
+    ];
+
+    let b = Arc::clone(&bridge);
+    let seq_ctr = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let exec = Arc::new(ScriptedExecutor::new(move |act| {
+        let b = Arc::clone(&b);
+        let centered = centered_nodes.clone();
+        let dev_opts = dev_opts_nodes.clone();
+        let seq = Arc::clone(&seq_ctr);
+        async move {
+            match act.kind {
+                UIActionKind::Swipe => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let s = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = seed_screen_into_graph(&b, s, "com.android.settings", centered).await;
+                }
+                UIActionKind::Tap => {
+                    assert!(
+                        act.y.unwrap_or(0) < 2300,
+                        "Tap must wait until Developer options scrolls into viewport (got y={:?})",
+                        act.y
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let s = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = seed_screen_into_graph(&b, s, "com.android.settings", dev_opts).await;
+                }
+                _ => {}
+            }
+        }
+    }));
+
+    let outcome = bridge
+        .explore_and_click(
+            "Developer options",
+            "SER1",
+            exec,
+            ExploreOptions {
+                max_scrolls: 2,
+                step_timeout_ms: 400,
+                post_settle_quiescence_ms: 40,
+                prefer_graph_route: false,
+                ..ExploreOptions::default()
+            },
+        )
+        .await
+        .expect("explore_and_click should scroll past clipped row");
+    match outcome {
+        ExploreOutcome::ExploredAndClicked {
+            scrolls_performed,
+            matched_candidate,
+            screen_changed,
+            edge_recorded,
+            ..
+        } => {
+            assert_eq!(scrolls_performed, 1);
+            assert_eq!(matched_candidate.center_y, 1728);
+            assert!(screen_changed);
+            assert!(edge_recorded);
+        }
+        other => panic!("Expected ExploredAndClicked, got {other:?}"),
+    }
+
+    // 2. Compacted canonical vertex: if a tap leaves the screen on the same compacted vertex
+    //    (raw hash != canonical hash, Jaccard >= 0.90), screen_changed & edge_recorded must be false.
+    let bridge2 = Arc::new(ShadowGraphBridge::with_default_config());
+    let mut base_nodes: Vec<ShadowUINode> = (0..12)
+        .map(|i| {
+            mk_node(
+                100 + i,
+                None,
+                i as i32,
+                "com.example.app",
+                "TextView",
+                &format!("com.example.app:id/item_{i}"),
+                &format!("StableRow{i}"),
+                "",
+                &format!("[40,{}][800,{}]", 200 + i * 100, 280 + i * 100),
+                true,
+                false,
+                false,
+            )
+        })
+        .collect();
+    let h_canon = seed_screen_into_graph(&bridge2, 1, "com.example.app", base_nodes.clone()).await;
+
+    // Slightly jittered screen (1 extra badge out of 13 -> Jaccard = 12/13 ≈ 0.923 >= 0.90)
+    base_nodes.push(mk_node(
+        200,
+        None,
+        12,
+        "com.example.app",
+        "TextView",
+        "com.example.app:id/jitter",
+        "TinyJitterBadge",
+        "",
+        "[820,200][1000,260]",
+        false,
+        false,
+        false,
+    ));
+    let _ = seed_screen_into_graph(&bridge2, 2, "com.example.app", base_nodes).await;
+    assert_eq!(
+        bridge2.graph_engine.current_state_hash().await,
+        Some(h_canon),
+        "Jittered frame must compact into canonical vertex"
+    );
+
+    let noop_exec = Arc::new(ScriptedExecutor::new(|_| async {}));
+    let noop_outcome = bridge2
+        .explore_and_click(
+            "StableRow0",
+            "SER1",
+            noop_exec,
+            ExploreOptions {
+                max_scrolls: 0,
+                step_timeout_ms: 120,
+                post_settle_quiescence_ms: 0,
+                prefer_graph_route: false,
+                ..ExploreOptions::default()
+            },
+        )
+        .await
+        .expect("noop tap on compacted vertex");
+    match noop_outcome {
+        ExploreOutcome::ExploredAndClicked {
+            start_hash,
+            final_hash,
+            screen_changed,
+            edge_recorded,
+            ..
+        } => {
+            assert_eq!(start_hash, h_canon);
+            assert_eq!(final_hash, h_canon);
+            assert!(!screen_changed, "No-op tap on compacted vertex must report screen_changed=false");
+            assert!(!edge_recorded, "No-op tap on compacted vertex must not record bogus edge");
+        }
+        other => panic!("Expected ExploredAndClicked, got {other:?}"),
+    }
+}

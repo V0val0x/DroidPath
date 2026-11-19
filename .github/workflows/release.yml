@@ -102,7 +102,7 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   publish-release:
     needs: [build-daemon, build-mcp-binaries, build-desktop-hud]
@@ -113,10 +113,20 @@ jobs:
         with:
           path: release-artifacts
           merge-multiple: true
-      - name: Include zero-Node installer scripts
+      - name: Flatten nested bundle artifacts and include installer scripts
         run: |
+          find release-artifacts -mindepth 2 -type f -exec mv -n {} release-artifacts/ \;
+          find release-artifacts -mindepth 1 -type d -empty -delete
           cp scripts/install.sh release-artifacts/install.sh
           cp scripts/install.ps1 release-artifacts/install.ps1
+          echo "=== Staged GitHub Release assets ==="
+          ls -lh release-artifacts/
+          for ext in dmg deb msi; do
+            if ! compgen -G "release-artifacts/*.$ext" > /dev/null; then
+              echo "ERROR: Missing expected Desktop HUD release bundle (*.$ext) in release-artifacts/" >&2
+              exit 1
+            fi
+          done
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
