@@ -13,7 +13,7 @@
 
 **DroidPath** eliminates slow, token-heavy VLM screenshot-think-tap loops for Android automation. Instead of asking an LLM to inspect screenshots at every step, DroidPath streams a live **Shadow DOM** directly from Android Accessibility & Window APIs, compiles UI transitions into a **persistent Spatial Graph**, and navigates multi-screen workflows deterministically with **A\* pathfinding** in sub-second hops — with **zero intermediate LLM roundtrips**.
 
-Now powered by a **zero-JVM cross-platform Rust core (`droidpath-core`)**, a **~3–5 MB native MCP CLI (`droidpath-mcp`)**, a **Tauri v2 Desktop HUD** with built-in H.264 WebCodecs mirroring (Windows, Linux Wayland/X11, macOS), and **1-click Zero-Friction Onboarding** (`npx droidpath` / `install.sh` / `install.ps1`). Fully **100% `shadow_graph.json` compatible** with native macOS [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
+Now powered by a **zero-JVM cross-platform Rust core (`droidpath-core`)**, a **~1.8 MB native MCP CLI (`droidpath-mcp`)**, a **Tauri v2 Desktop HUD (`~3.9 MB`)** with built-in H.264 WebCodecs mirroring (Windows, Linux Wayland/X11, macOS), and **1-click Zero-Friction Onboarding** (`npx droidpath` / `install.sh` / `install.ps1`). Fully **100% `shadow_graph.json` compatible** with native macOS [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
 
 ---
 
@@ -54,7 +54,7 @@ irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1
 
 ```mermaid
 flowchart LR
-    Agent["AI Agent (Claude / Cursor / MCP Client)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~4MB)\n+ npx droidpath CLI"]
+    Agent["AI Agent (Claude / Cursor / MCP Client)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~1.8 MB)\n+ npx droidpath CLI"]
 
     subgraph Host["Windows · Linux · macOS Host (Rust droidpath-core + Tauri v2 HUD)"]
         CLI <-->|"Path Queries & Passive Learning"| Bridge["ShadowGraphBridge"]
@@ -78,17 +78,17 @@ flowchart LR
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM Daemon (`android-daemon/`):**
-   - Compiles into a standalone **~635 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required.
-   - Streams full snapshots, compact NDJSON incremental diffs, and `FLAG_SECURE` / biometric events over TCP (`:27189`).
+   - Compiles into a standalone **650 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required.
+   - Streams full snapshots, compact NDJSON incremental diffs, foreground `TYPE_APPLICATION` window priority over `com.android.systemui` notifications, and `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` events on `FLAG_SECURE` or biometric prompts over TCP (`:27189`).
    - Deployed idempotently via SHA-256 verification and protected by automatic self-healing recovery.
 
 2. **Layer 2 — Cross-Platform Rust Core (`crates/droidpath-core`):**
-   - Bit-exact FNV-1a 64-bit `ScreenLayoutHasher` stripping volatile clocks, dates, prices, ETAs, weights, decorative banner `ImageView`s, and `com.android.systemui` notification overlays.
-   - `SpatialGraphEngine` builds a directed multigraph with automatic Jaccard (`>= 0.90`) compaction, acyclic spanning DAG rebuild, and **100% bidirectional `shadow_graph.json` compatibility** with Swift `AndOnMac`.
+   - Bit-exact FNV-1a 64-bit `ScreenLayoutHasher` stripping volatile clocks, dates, e-commerce tokens (`<PRICE>`, `<ETA>`, `<WEIGHT>`), unanchored decorative banner `ImageView`s, and `com.android.systemui` notification overlays.
+   - `SpatialGraphEngine` builds a directed multigraph with automatic Jaccard (`>= 0.90`) compaction, hazardous edge classification (`HazardousActionClassifier`), acyclic spanning DAG rebuild, and **100% bidirectional `shadow_graph.json` compatibility** with Swift `AndOnMac`.
 
 3. **Layer 3 — Persistent A\* Router, MCP CLI (`crates/droidpath-mcp`) & Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
-   - `AStarPathfinder` + `MacroExecutionEngine` with forward-skip recovery, off-path scroll replan, universal popup dismissal, reflexive heads-up notification swipe-up, hazardous payment/delete HITL confirmation, and `FLAG_SECURE` biometric handoff.
-   - **Tauri v2 Desktop HUD** combines an embedded `scrcpy-server` H.264 -> WebCodecs `<canvas>` mirror (with automatic `screencap` fallback) and an integrated Agentic HUD in a single window — working cleanly on **Windows, macOS, and Linux Wayland/X11** while preserving passive learning by clicking and interactive HITL Approve/Cancel buttons.
+   - `AStarPathfinder` + `MacroExecutionEngine` with forward-skip recovery (`1 -> 3/4`), off-path scroll replan, universal popup dismissal (`UniversalDismissDetector`), reflexive heads-up notification swipe-up, Human-in-the-Loop confirmation (`requires_confirmation` / `confirmed: true`) before irreversible payment/destructive steps, and `FLAG_SECURE` biometric handoff (60s default wait).
+   - **Tauri v2 Desktop HUD** combines an embedded `scrcpy-server` H.264 -> WebCodecs `<canvas>` mirror (with automatic `screencap` fallback) and an integrated 3-color **Agentic HUD** (**Red** autonomous execution, **Yellow** awaiting HITL confirmation with interactive *Approve / Cancel* buttons, **Blue** awaiting biometrics / `FLAG_SECURE`) + live SVG Spatial Graph Explorer in a single window — working cleanly on **Windows, macOS, and Linux Wayland/X11** while preserving passive graph learning by clicking.
 
 ---
 
@@ -108,11 +108,13 @@ Prompt: *"Navigate to Night Light"* from Launcher Home Screen:
 
 ## Comparison with Alternatives
 
-| Tool | UI & Automation Model | Latency / Action | LLM Overhead |
-| :--- | :--- | :---: | :--- |
-| **Mobile MCP / Maestro MCP / adbridge** | Stateless ADB / `uiautomator` wrappers | 2–4 s | LLM plans every tap/scroll |
-| **Appium / CursorTouch** | WebDriver sessions or screenshot/coordinate loops | 2–5 s | Heavy screenshot / selector polling |
-| **DroidPath (Rust + Tauri v2 / AndOnMac)** | Persistent DAG + A\* router + live Shadow DOM daemon | `<1s` / hop | `0` intermediate calls on known routes |
+Existing solutions rely on stateless ADB bindings, adding 2–4 seconds of latency per action and forcing the LLM to micromanage the UI step by step. DroidPath (and [AndOnMac](https://github.com/V0val0x/AndOnMac)) uses a persistent Directed Acyclic Graph (DAG) and A* routing across Windows, Linux, and macOS, cutting latency to `<1s` per click and removing LLM overhead on known routes.
+
+| Tool | UI & Automation Model | Latency / Action | LLM Overhead | Mirroring & HUD |
+| :--- | :--- | :---: | :--- | :--- |
+| **Mobile MCP / Maestro MCP / adbridge** | Stateless ADB / `uiautomator` wrappers | 2–4 s | LLM plans every tap/scroll | None |
+| **Appium / CursorTouch** | WebDriver sessions or screenshot/coordinate loops | 2–5 s | Heavy screenshot / selector polling | External / VNC |
+| **DroidPath (Rust + Tauri v2 / AndOnMac)** | Persistent DAG + A\* router + live Shadow DOM daemon | `<1s` / hop | `0` intermediate calls on known routes | Tauri v2 WebCodecs / 120Hz Metal + 3-color HUD |
 
 ---
 
@@ -127,7 +129,7 @@ cd DroidPath
 # 1. Run all Rust core + MCP integration tests
 cargo test -p droidpath-core -p droidpath-mcp
 
-# 2. Build optimized native droidpath-mcp binary (~4 MB, zero JVM)
+# 2. Build optimized native droidpath-mcp binary (~1.8 MB, zero JVM)
 cargo build --release -p droidpath-mcp
 
 # 3. Run Node.js 1-click CLI tests

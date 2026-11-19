@@ -3,21 +3,22 @@ import os from "node:os";
 import path from "node:path";
 
 export function resolveClientConfigPath(client, { platform = process.platform, env = process.env, homeDir = os.homedir() } = {}) {
+  const targetPath = platform === "win32" ? path.win32 : path.posix;
   switch (client) {
     case "cursor":
-      return path.join(homeDir, ".cursor", "mcp.json");
+      return targetPath.join(homeDir, ".cursor", "mcp.json");
     case "claude":
     case "claude-desktop":
       if (platform === "darwin") {
-        return path.join(homeDir, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+        return targetPath.join(homeDir, "Library", "Application Support", "Claude", "claude_desktop_config.json");
       }
       if (platform === "win32") {
-        const appData = env.APPDATA || path.join(homeDir, "AppData", "Roaming");
-        return path.join(appData, "Claude", "claude_desktop_config.json");
+        const appData = env.APPDATA || targetPath.join(homeDir, "AppData", "Roaming");
+        return targetPath.join(appData, "Claude", "claude_desktop_config.json");
       }
-      return path.join(homeDir, ".config", "Claude", "claude_desktop_config.json");
+      return targetPath.join(homeDir, ".config", "Claude", "claude_desktop_config.json");
     case "claude-code":
-      return path.join(homeDir, ".claude.json");
+      return targetPath.join(homeDir, ".claude.json");
     default:
       throw new Error(`Unsupported MCP client '${client}'. Expected cursor, claude, claude-code, or all.`);
   }

@@ -13,7 +13,7 @@
 
 **DroidPath** избавляет ИИ-агентов от медленных и дорогих циклов *«скриншот → рассуждение VLM → клик»* при автоматизации Android. Вместо анализа скриншотов на каждом шаге DroidPath стримит живой **Shadow DOM** напрямую из Accessibility/Window API, компилирует переходы между экранами в **персистентный Spatial Graph** и проходит многошаговые маршруты детерминированным **алгоритмом A\*** за миллисекунды — с **нулём промежуточных вызовов LLM**.
 
-Версия 2.0 перенесена на **кроссплатформенный Rust (`droidpath-core`)** без JVM, компактный нативный **MCP CLI (`droidpath-mcp`, ~4 МБ)**, **Tauri v2 Desktop HUD** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **установку в 1 клик** (`npx droidpath`, `install.sh`, `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
+Версия 2.0 перенесена на **кроссплатформенный Rust (`droidpath-core`)** без JVM, компактный нативный **MCP CLI (`droidpath-mcp`, ~1.8 МБ)**, **Tauri v2 Desktop HUD (`~3.9 МБ`)** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **установку в 1 клик** (`npx droidpath`, `install.sh`, `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
 
 ---
 
@@ -54,7 +54,7 @@ irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1
 
 ```mermaid
 flowchart LR
-    Agent["ИИ-агент (Claude / Cursor / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~4 МБ)\n+ npx droidpath CLI"]
+    Agent["ИИ-агент (Claude / Cursor / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~1.8 МБ)\n+ npx droidpath CLI"]
 
     subgraph Host["Windows · Linux · macOS Хост (Rust droidpath-core + Tauri v2 HUD)"]
         CLI <-->|"Поиск путей и пассивное обучение"| Bridge["ShadowGraphBridge"]
@@ -78,16 +78,16 @@ flowchart LR
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM демон (`android-daemon/`):**
-   - Автономный **single-DEX JAR (~635 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK.
-   - Стримит полные снимки, инкрементальные NDJSON-диффы и события `FLAG_SECURE` / биометрии по TCP (`:27189`).
+   - Автономный **single-DEX JAR (650 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK.
+   - Стримит полные снимки, инкрементальные NDJSON-диффы, привязку к основному окну приложения (`TYPE_APPLICATION`) под оверлеями `com.android.systemui` и события `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` при `FLAG_SECURE` / биометрии по TCP (`:27189`).
 
 2. **Layer 2 — Кроссплатформенное ядро на Rust (`crates/droidpath-core`):**
-   - Побитово совместимый FNV-1a 64-bit `ScreenLayoutHasher`: очищает часы, даты, цены, ETA, веса, декоративные `ImageView` баннеры и системные push-баннеры `com.android.systemui`.
-   - `SpatialGraphEngine` строит мультиграф с компактацией по Жаккару (`>= 0.90`), ациклическим остовным DAG и **100% двусторонней совместимостью `shadow_graph.json`** с Swift `AndOnMac`.
+   - Побитово совместимый FNV-1a 64-bit `ScreenLayoutHasher`: очищает часы, даты, e-commerce токены (`<PRICE>`, `<ETA>`, `<WEIGHT>`), декоративные `ImageView` баннеры и системные push-баннеры `com.android.systemui`.
+   - `SpatialGraphEngine` строит мультиграф с компактификацией по Жаккару (`>= 0.90`), классификацией опасных рёбер (`HazardousActionClassifier`), ациклическим остовным DAG и **100% двусторонней совместимостью `shadow_graph.json`** с Swift `AndOnMac`.
 
 3. **Layer 3 — A\* роутер, MCP CLI (`crates/droidpath-mcp`) и Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
-   - `AStarPathfinder` + `MacroExecutionEngine` с forward-skip восстановлением, перепланированием после скролла, универсальным закрытием промо-попапов, смахиванием пуш-уведомлений, HITL-подтверждением опасных действий (оплата/удаление) и паузой на `FLAG_SECURE`.
-   - **Tauri v2 Desktop HUD** объединяет встроенное зеркало экрана (`scrcpy-server` H.264 -> WebCodecs `<canvas>` с автоматическим fallback на `screencap`) и Agentic HUD в одном окне — работает на **Windows, macOS и Linux Wayland/X11**, сохраняет пассивное обучение кликами и интерактивные HITL-кнопки *Approve / Cancel*.
+   - `AStarPathfinder` + `MacroExecutionEngine` с forward-skip восстановлением (`1 -> 3/4`), перепланированием после скролла, универсальным закрытием промо-попапов (`UniversalDismissDetector`), смахиванием пуш-уведомлений, HITL-подтверждением опасных действий (`requires_confirmation` / `confirmed: true`) и паузой на `FLAG_SECURE` (таймаут ожидания 60 с по умолчанию).
+   - **Tauri v2 Desktop HUD** объединяет встроенное зеркало экрана (`scrcpy-server` H.264 -> WebCodecs `<canvas>` с автоматическим fallback на `screencap`), трёхцветный **Agentic HUD** (**Красный** — автономная работа, **Жёлтый** — ожидание подтверждения HITL с интерактивными кнопками *Approve / Cancel*, **Синий** — ожидание биометрии / `FLAG_SECURE`) и интерактивный SVG-инспектор графа в одном окне — работает на **Windows, macOS и Linux Wayland/X11** и сохраняет пассивное обучение кликами.
 
 ---
 
@@ -103,6 +103,16 @@ flowchart LR
 | :---: |
 | ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
 
+## Comparison with Alternatives
+
+Существующие решения используют stateless ADB-биндинги, что даёт 2–4 секунды задержки на каждое действие и заставляет LLM микроменеджить интерфейс. DroidPath (и [AndOnMac](https://github.com/V0val0x/AndOnMac)) использует персистентный направленный ациклический граф (DAG) и A*-маршрутизацию на Windows, Linux и macOS, снижая latency до `<1s` на клик и полностью снимая нагрузку с LLM при навигации по известным маршрутам.
+
+| Инструмент | Подход к автоматизации | Задержка на шаг | Нагрузка на LLM | Зеркалирование и HUD |
+| :--- | :--- | :---: | :--- | :--- |
+| **Mobile MCP / Maestro MCP / adbridge** | Stateless-обёртки над ADB / `uiautomator` | 2–4 с | LLM планирует каждый клик и свайп | Нет |
+| **Appium / CursorTouch** | WebDriver-сессии или циклы по скриншотам | 2–5 с | Частые запросы к модели и опрос DOM | Внешнее / VNC |
+| **DroidPath (Rust + Tauri v2 / AndOnMac)** | Персистентный DAG + A*-роутер + Shadow DOM демон | `<1s` / шаг | `0` промежуточных вызовов на известных маршрутах | Tauri v2 WebCodecs / 120Hz Metal + 3-цветный HUD |
+
 ---
 
 ## Сборка из исходников
@@ -116,7 +126,7 @@ cd DroidPath
 # 1. Тесты Rust ядра и MCP-сервера
 cargo test -p droidpath-core -p droidpath-mcp
 
-# 2. Сборка нативного release-бинарника droidpath-mcp (~4 МБ, без JVM)
+# 2. Сборка нативного release-бинарника droidpath-mcp (~1.8 МБ, без JVM)
 cargo build --release -p droidpath-mcp
 
 # 3. Тесты Node.js 1-клик CLI

@@ -148,7 +148,7 @@ test("configureMcpClient safely merges Cursor & Claude Desktop configs across pl
       homeDir: "C:\\Users\\dev",
       env: { APPDATA: "C:\\Users\\dev\\AppData\\Roaming" },
     }),
-    path.join("C:\\Users\\dev\\AppData\\Roaming", "Claude", "claude_desktop_config.json")
+    path.win32.join("C:\\Users\\dev\\AppData\\Roaming", "Claude", "claude_desktop_config.json")
   );
   assert.equal(
     resolveClientConfigPath("claude", { platform: "linux", homeDir: "/home/dev" }),
