@@ -57,6 +57,7 @@ impl Default for SpatialGraphEngine {
 impl SpatialGraphEngine {
     const DEFAULT_CANONICAL_SIMILARITY_THRESHOLD: f64 = 0.90;
     const MINIMUM_CANONICAL_TOKEN_COUNT: usize = 4;
+    pub const EDGE_PRUNE_FAILURE_THRESHOLD: i32 = 5;
 
     pub fn new(
         hasher: ScreenLayoutHasher,
@@ -121,7 +122,161 @@ impl SpatialGraphEngine {
     }
 
     pub async fn record_pending_action(&self, action: AttributedUIAction) {
-        self.inner.lock().await.pending_action = Some(action);
+        self.inner.lock().await.pending_action = Some(action.redacted_for_storage());
+    }
+
+    /// Resets `consecutive_failures` to `0` when an edge is traversed cleanly.
+    pub async fn record_edge_success(&self, edge_id: Uuid) {
+        let notify_handler = {
+            let mut g = self.inner.lock().await;
+            let mut changed = false;
+            for edges in g.outgoing_edges.values_mut() {
+                if let Some(edge) = edges.iter_mut().find(|e| e.id == edge_id) {
+                    if edge.consecutive_failures != 0 {
+                        edge.consecutive_failures = 0;
+                        changed = true;
+                    }
+                    break;
+                }
+            }
+            if changed {
+                g.topology_revision = g.topology_revision.wrapping_add(1);
+                g.on_topology_changed.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(h) = notify_handler {
+            tokio::spawn(async move { h().await });
+        }
+    }
+
+    /// Increments `consecutive_failures` for an edge after a step timeout.
+    /// Automatically prunes the edge once `consecutive_failures >= EDGE_PRUNE_FAILURE_THRESHOLD` (5),
+    /// rebuilding the acyclic spanning DAG when a spanning edge is removed.
+    /// Returns `Some((new_failure_count, was_pruned))`, or `None` if `edge_id` was not found.
+    pub async fn record_edge_failure(&self, edge_id: Uuid) -> Option<(i32, bool)> {
+        let (outcome, notify_handler) = {
+            let mut g = self.inner.lock().await;
+            let mut found_from: Option<u64> = None;
+            let mut found_idx: Option<usize> = None;
+
+            for (&from_hash, edges) in &g.outgoing_edges {
+                if let Some(idx) = edges.iter().position(|e| e.id == edge_id) {
+                    found_from = Some(from_hash);
+                    found_idx = Some(idx);
+                    break;
+                }
+            }
+
+            let (Some(from_hash), Some(idx)) = (found_from, found_idx) else {
+                return None;
+            };
+
+            let (new_count, pruned, was_spanning) = {
+                let edges = g.outgoing_edges.get_mut(&from_hash).expect("from_hash present");
+                edges[idx].consecutive_failures = edges[idx].consecutive_failures.saturating_add(1);
+                let count = edges[idx].consecutive_failures;
+                if count >= Self::EDGE_PRUNE_FAILURE_THRESHOLD {
+                    let removed = edges.remove(idx);
+                    (count, true, removed.is_spanning_tree_edge)
+                } else {
+                    (count, false, false)
+                }
+            };
+
+            if pruned {
+                if g.outgoing_edges
+                    .get(&from_hash)
+                    .map(Vec::is_empty)
+                    .unwrap_or(false)
+                {
+                    g.outgoing_edges.remove(&from_hash);
+                }
+                if was_spanning {
+                    Self::rebuild_spanning_dag(&mut g);
+                }
+            }
+
+            g.topology_revision = g.topology_revision.wrapping_add(1);
+            let handler = g.on_topology_changed.clone();
+            (Some((new_count, pruned)), handler)
+        };
+
+        if let Some(h) = notify_handler {
+            tokio::spawn(async move { h().await });
+        }
+        outcome
+    }
+
+    /// Explicitly attributes a direct executable edge `(from_hash -> to_hash)` when a tap/action
+    /// settled across intermediate async-loading skeleton frames that consumed `pending_action`.
+    /// Both vertices must already exist in the graph (`from_hash != to_hash`).
+    pub async fn record_direct_edge(
+        &self,
+        from_hash: u64,
+        to_hash: u64,
+        action: AttributedUIAction,
+        transition_ms: f64,
+    ) -> Option<ScreenTransitionEdge> {
+        if from_hash == to_hash {
+            return None;
+        }
+        let redacted = action.redacted_for_storage();
+        let action_sig = redacted.signature();
+        let hazard = HazardousActionClassifier::assess(Some(&redacted), &action_sig, None, None);
+        let now = Utc::now();
+
+        let (result, notify_handler) = {
+            let mut g = self.inner.lock().await;
+            if !g.vertices.contains_key(&from_hash) || !g.vertices.contains_key(&to_hash) {
+                return None;
+            }
+            let edges = g.outgoing_edges.entry(from_hash).or_default();
+            let committed = if let Some(existing) = edges
+                .iter_mut()
+                .find(|e| e.to_hash == to_hash && e.action_signature == action_sig)
+            {
+                let old_count = existing.traversal_count as f64;
+                existing.traversal_count += 1;
+                existing.average_transition_ms = ((existing.average_transition_ms * old_count)
+                    + transition_ms)
+                    / (old_count + 1.0);
+                existing.last_traversed_at = now;
+                existing.action = Some(redacted);
+                existing.consecutive_failures = 0;
+                if hazard.is_hazardous {
+                    existing.is_hazardous = true;
+                    existing.hazard_reason = Some(hazard.reason());
+                }
+                existing.clone()
+            } else {
+                let edge = ScreenTransitionEdge {
+                    id: Uuid::new_v4(),
+                    from_hash,
+                    to_hash,
+                    action: Some(redacted),
+                    action_signature: action_sig,
+                    traversal_count: 1,
+                    average_transition_ms: transition_ms,
+                    is_spanning_tree_edge: false,
+                    last_traversed_at: now,
+                    is_hazardous: hazard.is_hazardous,
+                    hazard_reason: hazard.is_hazardous.then(|| hazard.reason()),
+                    consecutive_failures: 0,
+                };
+                edges.push(edge.clone());
+                edge
+            };
+            g.topology_revision = g.topology_revision.wrapping_add(1);
+            let handler = g.on_topology_changed.clone();
+            (Some(committed), handler)
+        };
+
+        if let Some(h) = notify_handler {
+            tokio::spawn(async move { h().await });
+        }
+        result
     }
 
     pub async fn process(&self, update: &ShadowDOMUpdate) -> Option<ScreenTransitionEdge> {
@@ -259,7 +414,8 @@ impl SpatialGraphEngine {
             }
 
             let attributed_action =
-                Self::consume_valid_pending_action(&mut g, now, self.pending_action_ttl_secs);
+                Self::consume_valid_pending_action(&mut g, now, self.pending_action_ttl_secs)
+                    .map(|a| a.redacted_for_storage());
             let ref_time = attributed_action
                 .as_ref()
                 .map(|a| a.timestamp)
@@ -323,6 +479,7 @@ impl SpatialGraphEngine {
                     ((existing.average_transition_ms * prev_count) + transition_ms)
                         / (existing.traversal_count as f64);
                 existing.last_traversed_at = now;
+                existing.consecutive_failures = 0;
                 if hazard.is_hazardous && !existing.is_hazardous {
                     existing.is_hazardous = true;
                     existing.hazard_reason = Some(hazard.reason());
@@ -342,6 +499,7 @@ impl SpatialGraphEngine {
                     last_traversed_at: now,
                     is_hazardous: hazard.is_hazardous,
                     hazard_reason: hazard.is_hazardous.then(|| hazard.reason()),
+                    consecutive_failures: 0,
                 };
                 committed_edge = edge.clone();
                 edges.push(edge);
@@ -558,6 +716,11 @@ impl SpatialGraphEngine {
         let mut raw_vertices_by_hash: HashMap<u64, ScreenStateVertex> =
             HashMap::with_capacity(snapshot.vertices.len());
         for mut vertex in snapshot.vertices {
+            vertex.sample_interactive_labels = vertex
+                .sample_interactive_labels
+                .into_iter()
+                .map(|l| ScreenLayoutHasher::redact_pii(&l))
+                .collect();
             if !vertex.semantic_tokens.is_empty() {
                 let canonicalized: BTreeSet<String> = vertex
                     .semantic_tokens
@@ -707,7 +870,14 @@ impl SpatialGraphEngine {
         let mut ordered_edge_keys: Vec<RewiredEdgeKey> = Vec::new();
         let mut dropped_or_merged_edge_count = 0usize;
 
-        for edge in snapshot.edges {
+        for mut edge in snapshot.edges {
+            if edge.consecutive_failures >= Self::EDGE_PRUNE_FAILURE_THRESHOLD {
+                dropped_or_merged_edge_count += 1;
+                continue;
+            }
+            edge.action = edge.action.map(|a| a.redacted_for_storage());
+            edge.action_signature = ScreenLayoutHasher::redact_pii(&edge.action_signature);
+
             let (Some(&mapped_from), Some(&mapped_to)) =
                 (canonical_map.get(&edge.from_hash), canonical_map.get(&edge.to_hash))
             else {
@@ -747,11 +917,18 @@ impl SpatialGraphEngine {
                 } else {
                     existing.average_transition_ms
                 };
-                let newer_action = if edge.last_traversed_at >= existing.last_traversed_at {
-                    edge.action.or(existing.action)
-                } else {
-                    existing.action.or(edge.action)
-                };
+                let (newer_action, merged_failures) =
+                    if edge.last_traversed_at >= existing.last_traversed_at {
+                        (
+                            edge.action.or(existing.action),
+                            edge.consecutive_failures.max(0),
+                        )
+                    } else {
+                        (
+                            existing.action.or(edge.action),
+                            existing.consecutive_failures.max(0),
+                        )
+                    };
                 let hazard = HazardousActionClassifier::assess(
                     newer_action.as_ref(),
                     &edge.action_signature,
@@ -779,6 +956,7 @@ impl SpatialGraphEngine {
                         last_traversed_at: existing.last_traversed_at.max(edge.last_traversed_at),
                         is_hazardous: merged_hazardous,
                         hazard_reason: if merged_hazardous { merged_reason } else { None },
+                        consecutive_failures: merged_failures,
                     },
                 );
             } else {
@@ -806,6 +984,7 @@ impl SpatialGraphEngine {
                         last_traversed_at: edge.last_traversed_at,
                         is_hazardous: is_haz,
                         hazard_reason: if is_haz { haz_reason } else { None },
+                        consecutive_failures: edge.consecutive_failures.max(0),
                     },
                 );
                 ordered_edge_keys.push(key);

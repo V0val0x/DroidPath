@@ -16,7 +16,19 @@ import {
   resolveDesktopHudBinaryPath,
   resolveMcpBinaryPath,
 } from "./binary-resolver.mjs";
-import { buildMcpServerEntry, configureMcpClient, resolveClientConfigPath } from "./mcp-config.mjs";
+import {
+  buildCompactLocalSystemPrompt,
+  buildMcpServerEntry,
+  buildOpenAIToolSchemas,
+  configureMcpClient,
+  installAgentRulesFile,
+  installLocalAiBundle,
+  isLocalAiClient,
+  loadCanonicalAgentRules,
+  normalizeClientName,
+  resolveClientConfigPath,
+  resolveClientRulesPaths,
+} from "./mcp-config.mjs";
 
 export const CLI_VERSION = "2.0.0";
 
@@ -28,8 +40,11 @@ USAGE:
 
 COMMANDS:
   start | up            1-click onboarding: auto-inject android-daemon.jar (adb push + forward + app_process)
-                        and optionally configure Cursor / Claude Desktop MCP
-  init                  Auto-configure Cursor / Claude Desktop / Claude Code MCP JSON config
+                        and optionally configure MCP clients & agent rules
+  init                  Auto-configure MCP configs + idempotent agent rules (Cursor, Claude, Gemini CLI,
+                        Antigravity, LM Studio, Ollama/OpenWebUI/Local AI)
+  rules                 Install/update idempotent agent rules (.cursorrules, CLAUDE.md, GEMINI.md,
+                        .agent/rules/droidpath.md, local OpenAI tool schemas & compact system prompt)
   daemon <action>       Manage Android Shadow DOM daemon: deploy | start | stop | status
   mcp                   Launch native Rust droidpath-mcp server (--stdio or --http) with auto-daemon inject
   hud                   Launch cross-platform Tauri Desktop HUD
@@ -39,14 +54,19 @@ OPTIONS:
   --serial <id>         Target ADB device serial (auto-selects first authorized device)
   --daemon-port <port>  Shadow DOM daemon TCP forward port (default: 27189)
   --jar <path>          Custom path to android-daemon.jar (defaults to bundled JAR)
-  --client <name>       MCP client for init: cursor | claude | claude-code | all (default: all)
+  --client <name>       Target client(s): cursor | claude | claude-code | gemini | antigravity |
+                        lm-studio | ollama | openwebui | local | all (comma-separated, default: all)
+  --no-rules            Skip installing agent rule files during 'init'
+  --dir <path>          Workspace directory for project rule files (default: cwd)
+  --global              Also install global user-level rules (~/.gemini/GEMINI.md, ~/.claude/CLAUDE.md)
+  --format <fmt>        For 'rules': print to stdout instead of writing (rules | prompt | local | openai)
   --http                Use HTTP/SSE transport instead of stdio
   --stdio               Use stdio JSON-RPC transport (default for mcp)
   --port <port>         HTTP/SSE listen port (default: 8766)
-  --configure           Also configure Cursor/Claude MCP during 'start'
+  --configure           Also configure MCP clients during 'start'
   --deploy              Also deploy android-daemon during 'init'
   --no-auto-deploy      Skip automatic daemon deploy before starting 'mcp'
-  --dry-run             Preview config changes without writing files
+  --dry-run             Preview config/rule changes without writing files
   --json                Machine-readable JSON output
   -v, --version         Print version
   -h, --help            Show help
@@ -60,6 +80,10 @@ export function parseCliArgs(argv) {
     port: 8766,
     jar: null,
     client: "all",
+    noRules: false,
+    dir: null,
+    global: false,
+    format: null,
     http: false,
     stdio: false,
     configure: false,
@@ -71,6 +95,14 @@ export function parseCliArgs(argv) {
     version: false,
   };
   const positional = [];
+
+  const requireFlagValue = (flagName, idx) => {
+    const val = argv[idx];
+    if (val === undefined || val.startsWith("-")) {
+      throw new Error(`Missing value for ${flagName}.`);
+    }
+    return val;
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -84,10 +116,10 @@ export function parseCliArgs(argv) {
         flags.version = true;
         break;
       case "--serial":
-        flags.serial = argv[++i] ?? null;
+        flags.serial = requireFlagValue("--serial", ++i);
         break;
       case "--daemon-port": {
-        const parsed = Number.parseInt(argv[++i] ?? "", 10);
+        const parsed = Number.parseInt(requireFlagValue("--daemon-port", ++i), 10);
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
           throw new Error("Invalid value for --daemon-port (expected 1-65535).");
         }
@@ -95,7 +127,7 @@ export function parseCliArgs(argv) {
         break;
       }
       case "--port": {
-        const parsed = Number.parseInt(argv[++i] ?? "", 10);
+        const parsed = Number.parseInt(requireFlagValue("--port", ++i), 10);
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
           throw new Error("Invalid value for --port (expected 1-65535).");
         }
@@ -104,10 +136,22 @@ export function parseCliArgs(argv) {
       }
       case "--jar":
       case "--daemon-jar":
-        flags.jar = argv[++i] ?? null;
+        flags.jar = requireFlagValue(a, ++i);
         break;
       case "--client":
-        flags.client = argv[++i] ?? "all";
+        flags.client = requireFlagValue("--client", ++i);
+        break;
+      case "--no-rules":
+        flags.noRules = true;
+        break;
+      case "--dir":
+        flags.dir = requireFlagValue("--dir", ++i);
+        break;
+      case "--global":
+        flags.global = true;
+        break;
+      case "--format":
+        flags.format = requireFlagValue("--format", ++i);
         break;
       case "--http":
         flags.http = true;
@@ -139,12 +183,55 @@ export function parseCliArgs(argv) {
   return { positional, flags };
 }
 
-function expandClients(clientArg) {
-  if (clientArg === "all") return ["cursor", "claude"];
-  return clientArg
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+export function expandClients(clientArg) {
+  if (clientArg === "all") {
+    return ["cursor", "claude", "claude-code", "gemini", "antigravity", "lm-studio", "local"];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const raw of clientArg.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const norm = normalizeClientName(raw);
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  return out;
+}
+
+function installRulesForClients(clients, { projectDir, homeDir, globalInstall, port, dryRun, localAiDir }) {
+  const rulesContent = loadCanonicalAgentRules();
+  const seenFiles = new Set();
+  const results = [];
+  let needsLocalBundle = false;
+
+  for (const client of clients) {
+    if (isLocalAiClient(client)) {
+      needsLocalBundle = true;
+    }
+    const targetFiles = resolveClientRulesPaths(client, {
+      projectDir,
+      homeDir,
+      globalInstall,
+    });
+    for (const filePath of targetFiles) {
+      if (seenFiles.has(filePath)) continue;
+      seenFiles.add(filePath);
+      results.push(installAgentRulesFile({ filePath, content: rulesContent, dryRun }));
+    }
+  }
+
+  if (needsLocalBundle) {
+    const bundleDir = localAiDir || path.join(homeDir, ".droidpath", "local-ai");
+    for (const r of installLocalAiBundle({ outDir: bundleDir, port, dryRun })) {
+      if (!seenFiles.has(r.filePath)) {
+        seenFiles.add(r.filePath);
+        results.push(r);
+      }
+    }
+  }
+
+  return results;
 }
 
 export async function runCli(argv, io = { out: console.log, err: console.error }) {
@@ -169,6 +256,8 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
   const command = positional[0] || "start";
   const sub = positional[1] || null;
   const jarPath = flags.jar || bundledDaemonJarPath();
+  const projectDir = flags.dir ? path.resolve(flags.dir) : process.cwd();
+  const homeDir = os.homedir();
 
   try {
     if (command === "start" || command === "up") {
@@ -180,6 +269,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       });
 
       const mcpChanges = [];
+      let ruleChanges = [];
       if (flags.configure) {
         const binaryPath = resolveMcpBinaryPath();
         const entry = buildMcpServerEntry({
@@ -189,13 +279,25 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
           port: flags.port,
           daemonPort: flags.daemonPort,
         });
-        for (const client of expandClients(flags.client)) {
-          mcpChanges.push(configureMcpClient({ client, entry, dryRun: flags.dryRun }));
+        const clients = expandClients(flags.client);
+        for (const client of clients) {
+          mcpChanges.push(
+            configureMcpClient({ client, entry, port: flags.port, dryRun: flags.dryRun })
+          );
+        }
+        if (!flags.noRules) {
+          ruleChanges = installRulesForClients(clients, {
+            projectDir,
+            homeDir,
+            globalInstall: flags.global,
+            port: flags.port,
+            dryRun: flags.dryRun,
+          });
         }
       }
 
       if (flags.json) {
-        io.out(JSON.stringify({ daemon: report, mcp: mcpChanges }, null, 2));
+        io.out(JSON.stringify({ daemon: report, mcp: mcpChanges, rules: ruleChanges }, null, 2));
       } else {
         io.out(`✅ DroidPath daemon ready on ${report.serial} (127.0.0.1:${report.port})`);
         if (report.pushed) {
@@ -204,8 +306,11 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
         for (const c of mcpChanges) {
           io.out(`✅ Configured ${c.client} MCP -> ${c.configPath}`);
         }
+        for (const r of ruleChanges) {
+          io.out(`✅ Rules (${r.action}) -> ${r.filePath}`);
+        }
         if (!flags.configure) {
-          io.out(`   Next: run \`npx droidpath init\` to auto-configure Cursor & Claude Desktop MCP.`);
+          io.out(`   Next: run \`npx droidpath init\` to auto-configure Cursor, Claude, Gemini, Antigravity & Local AI.`);
         }
       }
       return 0;
@@ -221,10 +326,24 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
         daemonPort: flags.daemonPort,
       });
 
+      const clients = expandClients(flags.client);
       const results = [];
-      for (const client of expandClients(flags.client)) {
-        results.push(configureMcpClient({ client, entry, dryRun: flags.dryRun }));
+      for (const client of clients) {
+        results.push(
+          configureMcpClient({ client, entry, port: flags.port, dryRun: flags.dryRun })
+        );
       }
+
+      const ruleResults = flags.noRules
+        ? []
+        : installRulesForClients(clients, {
+            projectDir,
+            homeDir,
+            globalInstall: flags.global,
+            port: flags.port,
+            dryRun: flags.dryRun,
+            localAiDir: flags.dir ? path.join(projectDir, ".droidpath-local-ai") : undefined,
+          });
 
       let deployResult = null;
       if (flags.deploy) {
@@ -237,14 +356,76 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       }
 
       if (flags.json) {
-        io.out(JSON.stringify({ configured: results, daemon: deployResult }, null, 2));
+        io.out(
+          JSON.stringify(
+            { configured: results, rules: ruleResults, daemon: deployResult },
+            null,
+            2
+          )
+        );
       } else {
         for (const r of results) {
-          const verb = r.dryRun ? "[dry-run] Would configure" : r.changed ? "✅ Configured" : "✓ Already configured";
+          const verb = r.dryRun
+            ? "[dry-run] Would configure"
+            : r.changed
+              ? "✅ Configured"
+              : "✓ Already configured";
           io.out(`${verb} ${r.client}: ${r.configPath}`);
+        }
+        for (const rr of ruleResults) {
+          const verb = rr.dryRun
+            ? `[dry-run] Would ${rr.action}`
+            : rr.changed
+              ? `✅ Rules (${rr.action})`
+              : "✓ Rules up to date";
+          io.out(`${verb}: ${rr.filePath}`);
         }
         if (deployResult) {
           io.out(`✅ Android daemon live on ${deployResult.serial} (127.0.0.1:${deployResult.port})`);
+        }
+      }
+      return 0;
+    }
+
+    if (command === "rules") {
+      if (flags.format) {
+        const fmt = flags.format.toLowerCase();
+        if (fmt === "rules" || fmt === "markdown" || fmt === "md") {
+          io.out(loadCanonicalAgentRules());
+          return 0;
+        }
+        if (fmt === "prompt" || fmt === "local-prompt" || fmt === "local" || fmt === "system-prompt") {
+          io.out(buildCompactLocalSystemPrompt({ port: flags.port }));
+          return 0;
+        }
+        if (fmt === "openai" || fmt === "openai-tools") {
+          io.out(JSON.stringify(buildOpenAIToolSchemas(), null, 2));
+          return 0;
+        }
+        io.err(`Unsupported --format '${flags.format}'. Expected: rules | prompt | local | openai`);
+        return 2;
+      }
+
+      const clients = expandClients(flags.client);
+      const ruleResults = installRulesForClients(clients, {
+        projectDir,
+        homeDir,
+        globalInstall: flags.global,
+        port: flags.port,
+        dryRun: flags.dryRun,
+        localAiDir: flags.dir ? path.join(projectDir, ".droidpath-local-ai") : undefined,
+      });
+
+      if (flags.json) {
+        io.out(JSON.stringify({ rules: ruleResults }, null, 2));
+      } else {
+        for (const rr of ruleResults) {
+          const verb = rr.dryRun
+            ? `[dry-run] Would ${rr.action}`
+            : rr.changed
+              ? `✅ Rules (${rr.action})`
+              : "✓ Rules up to date";
+          io.out(`${verb}: ${rr.filePath}`);
         }
       }
       return 0;
@@ -368,9 +549,14 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       const tcpReachable = await checkTcpPort("127.0.0.1", flags.daemonPort, 350);
       const mcpBin = resolveMcpBinaryPath();
       const hudBin = resolveDesktopHudBinaryPath();
-      const graphPath = path.join(os.homedir(), ".droidpath", "shadow_graph.json");
+      const graphPath = path.join(homeDir, ".droidpath", "shadow_graph.json");
       const cursorPath = resolveClientConfigPath("cursor");
       const claudePath = resolveClientConfigPath("claude");
+      const claudeCodePath = resolveClientConfigPath("claude-code");
+      const geminiPath = resolveClientConfigPath("gemini");
+      const antigravityPath = resolveClientConfigPath("antigravity");
+      const lmStudioPath = resolveClientConfigPath("lm-studio");
+      const localAiPath = resolveClientConfigPath("local");
 
       const report = {
         cliVersion: CLI_VERSION,
@@ -386,6 +572,11 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
         mcpConfigs: {
           cursor: { path: cursorPath, exists: existsSync(cursorPath) },
           claudeDesktop: { path: claudePath, exists: existsSync(claudePath) },
+          claudeCode: { path: claudeCodePath, exists: existsSync(claudeCodePath) },
+          gemini: { path: geminiPath, exists: existsSync(geminiPath) },
+          antigravity: { path: antigravityPath, exists: existsSync(antigravityPath) },
+          lmStudio: { path: lmStudioPath, exists: existsSync(lmStudioPath) },
+          localAi: { path: localAiPath, exists: existsSync(localAiPath) },
         },
       };
 

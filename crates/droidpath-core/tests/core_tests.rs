@@ -530,6 +530,7 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
         last_traversed_at: now,
         is_hazardous: false,
         hazard_reason: None,
+        consecutive_failures: 0,
     };
 
     let edges = vec![

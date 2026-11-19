@@ -11,7 +11,9 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::adb::{DroidPathActionExecutor, DroidPathAdbRunner};
-use crate::bridge::{RouteExecuteOptions, ShadowGraphBridge, ShadowNavigationOutcome};
+use crate::bridge::{
+    ExploreOptions, ExploreOutcome, RouteExecuteOptions, ShadowGraphBridge, ShadowNavigationOutcome,
+};
 use crate::protocol::{ShadowCompactNode, ShadowTreeMatchMode, ShadowUINode};
 use crate::router::{MacroActionExecutor, PathDeviationError};
 use crate::shadow_dom::ShadowDOMUpdate;
@@ -497,6 +499,7 @@ impl DroidPathManager {
         max_steps: usize,
         step_timeout_ms: u64,
         confirmed: bool,
+        auto_explore: bool,
         secure_handoff_timeout_secs: f64,
         executor: Option<Arc<dyn MacroActionExecutor>>,
     ) -> Result<ShadowNavigationOutcome, PathDeviationError> {
@@ -504,7 +507,8 @@ impl DroidPathManager {
         self.ensure_started(Some(serial), true).await;
         let active_executor = executor
             .unwrap_or_else(|| Arc::new(DroidPathActionExecutor::new(self.adb_runner.clone())));
-        self.bridge
+        let outcome = self
+            .bridge
             .route_and_execute(
                 serial,
                 active_executor,
@@ -514,11 +518,61 @@ impl DroidPathManager {
                     max_steps,
                     step_timeout_ms,
                     confirmed,
+                    auto_explore,
                     secure_handoff_timeout_secs,
                     ..RouteExecuteOptions::default()
                 },
             )
-            .await
+            .await;
+        if matches!(
+            outcome,
+            Ok(ShadowNavigationOutcome::Arrived(_)) | Ok(ShadowNavigationOutcome::Explored(_))
+        ) {
+            self.flush_persisted_graph().await;
+        }
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn explore_and_click(
+        self: &Arc<Self>,
+        serial: &str,
+        target: &str,
+        max_scrolls: usize,
+        step_timeout_ms: u64,
+        confirmed: bool,
+        prefer_graph_route: bool,
+        secure_handoff_timeout_secs: f64,
+        executor: Option<Arc<dyn MacroActionExecutor>>,
+    ) -> Result<ExploreOutcome, PathDeviationError> {
+        self.load_persisted_graph_if_needed().await;
+        self.ensure_started(Some(serial), true).await;
+        let active_executor = executor
+            .unwrap_or_else(|| Arc::new(DroidPathActionExecutor::new(self.adb_runner.clone())));
+        let outcome = self
+            .bridge
+            .explore_and_click(
+                target,
+                serial,
+                active_executor,
+                ExploreOptions {
+                    max_scrolls,
+                    step_timeout_ms,
+                    confirmed,
+                    prefer_graph_route,
+                    secure_handoff_timeout_secs,
+                    ..ExploreOptions::default()
+                },
+            )
+            .await;
+        if matches!(
+            outcome,
+            Ok(ExploreOutcome::ExploredAndClicked { .. })
+                | Ok(ExploreOutcome::ArrivedViaGraph { .. })
+        ) {
+            self.flush_persisted_graph().await;
+        }
+        outcome
     }
 
     pub async fn forward_daemon_port(&self, port: u16, explicit_serial: Option<&str>) {

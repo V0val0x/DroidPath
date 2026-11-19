@@ -61,6 +61,7 @@ pub struct DroidPathHttpServer {
     server: Arc<DroidPathMcpServerCore>,
     sse_sessions: Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
     accept_task: Mutex<Option<JoinHandle<()>>>,
+    bound_addr: Mutex<Option<std::net::SocketAddr>>,
     bound_port: Mutex<u16>,
 }
 
@@ -73,12 +74,17 @@ impl DroidPathHttpServer {
             server,
             sse_sessions: Arc::new(Mutex::new(HashMap::new())),
             accept_task: Mutex::new(None),
+            bound_addr: Mutex::new(None),
             bound_port: Mutex::new(0),
         }
     }
 
     pub async fn port(&self) -> u16 {
         *self.bound_port.lock().await
+    }
+
+    pub async fn bound_addr(&self) -> Option<std::net::SocketAddr> {
+        *self.bound_addr.lock().await
     }
 
     pub async fn start(
@@ -89,7 +95,9 @@ impl DroidPathHttpServer {
         self.stop().await;
 
         let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-        let actual_port = listener.local_addr()?.port();
+        let local_addr = listener.local_addr()?;
+        let actual_port = local_addr.port();
+        *self.bound_addr.lock().await = Some(local_addr);
         *self.bound_port.lock().await = actual_port;
 
         let server = Arc::clone(&self.server);

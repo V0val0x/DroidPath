@@ -1,7 +1,7 @@
 {
   "name": "droidpath",
   "version": "2.0.0",
-  "description": "Zero-friction 1-click CLI for DroidPath — auto-injects Android Shadow DOM daemon (adb push/forward/app_process), configures Cursor/Claude MCP, and launches native A* UI router.",
+  "description": "Zero-friction 1-click CLI for DroidPath — auto-injects Android Shadow DOM daemon (adb push/forward/app_process), configures Cursor/Claude/Gemini/Antigravity/Local AI MCP & agent rules, and launches native A* UI router.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -15,7 +15,7 @@
   "files": [
     "bin/",
     "src/",
-    "assets/android-daemon.jar"
+    "assets/"
   ],
   "engines": {
     "node": ">=18.0.0"
@@ -33,6 +33,11 @@
     "shadow-dom",
     "astar",
     "cursor",
-    "claude"
+    "claude",
+    "gemini",
+    "antigravity",
+    "ollama",
+    "lm-studio",
+    "local-ai"
   ]
 }

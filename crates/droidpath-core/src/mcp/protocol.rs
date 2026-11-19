@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::adb::DroidPathAdbRunner;
-use crate::bridge::ShadowNavigationOutcome;
+use crate::bridge::{ExploreOutcome, ShadowNavigationOutcome};
 use crate::manager::DroidPathManager;
 use crate::protocol::ShadowCompactNode;
 use crate::router::PathDeviationError;
@@ -209,9 +209,44 @@ impl DroidPathMcpServerCore {
                             "type": "boolean",
                             "description": "Set to true ONLY after explicit human confirmation in chat to execute hazardous/irreversible steps (payment, purchase, delete). Default: false."
                         },
+                        "auto_explore": {
+                            "type": "boolean",
+                            "description": "When true and no known graph route exists (no_route / target_not_found), automatically fall back to live Shadow DOM explore-and-click with bounded scrolling and DAG edge recording. Default: false."
+                        },
                         "device_serial": serial_prop
                     },
                     "required": []
+                }),
+            },
+            McpToolDefinition {
+                name: "android_explore_and_click",
+                description: "Dynamic Shadow DOM discovery + click with optional A* graph/prefix routing, bounded list scrolling (down/up), hazardous action HITL guard, and automatic Spatial Graph edge recording. Returns top-20 PII-redacted interactive candidates (needs_selection, isError: false) if no confident match is found.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "Target UI label, resource_id suffix, content_desc, or breadcrumb path (e.g. 'Night Light', 'Display > Night Light')."
+                        },
+                        "max_scrolls": {
+                            "type": "integer",
+                            "description": "Maximum bounded discovery scrolls (0-10). Default: 3."
+                        },
+                        "step_timeout_ms": {
+                            "type": "integer",
+                            "description": "Per-step Shadow DOM settlement timeout in ms (250-10000). Default: 2000."
+                        },
+                        "confirmed": {
+                            "type": "boolean",
+                            "description": "Set to true ONLY after explicit human confirmation in chat to click hazardous/irreversible elements. Default: false."
+                        },
+                        "prefer_graph_route": {
+                            "type": "boolean",
+                            "description": "Try known A* graph route (or nearest known prefix vertex) before scanning live Shadow DOM. Default: true."
+                        },
+                        "device_serial": serial_prop
+                    },
+                    "required": ["target"]
                 }),
             },
             McpToolDefinition {
@@ -410,6 +445,7 @@ impl DroidPathMcpServerCore {
                 let step_timeout_ms =
                     get_i32("step_timeout_ms").unwrap_or(2000).clamp(250, 10_000) as u64;
                 let confirmed = get_bool("confirmed").unwrap_or(false);
+                let auto_explore = get_bool("auto_explore").unwrap_or(false);
 
                 match self
                     .manager
@@ -420,12 +456,47 @@ impl DroidPathMcpServerCore {
                         max_steps,
                         step_timeout_ms,
                         confirmed,
+                        auto_explore,
                         60.0,
                         None,
                     )
                     .await
                 {
                     Ok(outcome) => Ok(Self::format_navigation_outcome(&outcome)),
+                    Err(deviation) => Ok(Self::format_path_deviation_result(&deviation)),
+                }
+            }
+
+            "android_explore_and_click" => {
+                let Some(target) = get_str("target").map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Ok(McpToolResult::text("Missing required 'target' parameter.", true));
+                };
+                let serial = self
+                    .adb_runner
+                    .resolve_target_serial(get_str("device_serial"))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let max_scrolls = get_i32("max_scrolls").unwrap_or(3).clamp(0, 10) as usize;
+                let step_timeout_ms =
+                    get_i32("step_timeout_ms").unwrap_or(2000).clamp(250, 10_000) as u64;
+                let confirmed = get_bool("confirmed").unwrap_or(false);
+                let prefer_graph_route = get_bool("prefer_graph_route").unwrap_or(true);
+
+                match self
+                    .manager
+                    .explore_and_click(
+                        &serial,
+                        target,
+                        max_scrolls,
+                        step_timeout_ms,
+                        confirmed,
+                        prefer_graph_route,
+                        60.0,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(outcome) => Ok(Self::format_explore_outcome(&outcome)),
                     Err(deviation) => Ok(Self::format_path_deviation_result(&deviation)),
                 }
             }
@@ -812,6 +883,10 @@ impl DroidPathMcpServerCore {
                 false,
             ),
 
+            ShadowNavigationOutcome::Explored(explore_outcome) => {
+                Self::format_explore_outcome(explore_outcome)
+            }
+
             ShadowNavigationOutcome::RequiresConfirmation(req) => McpToolResult::text(
                 json!({
                     "status": "requires_confirmation",
@@ -887,6 +962,132 @@ impl DroidPathMcpServerCore {
                 })
                 .to_string(),
                 true,
+            ),
+        }
+    }
+
+    pub fn format_explore_outcome(outcome: &ExploreOutcome) -> McpToolResult {
+        match outcome {
+            ExploreOutcome::ArrivedViaGraph {
+                report,
+                already_at_target,
+                active_package,
+            } => {
+                let summary: Vec<Value> = report
+                    .steps
+                    .iter()
+                    .map(|step| {
+                        json!({
+                            "step_index": step.step_index,
+                            "action": step.action_signature,
+                            "target_hash": Self::hex(step.target_hash),
+                            "elapsed_ms": step.elapsed_ms,
+                            "matched_by_exact_hash": step.matched_by_exact_hash,
+                            "skipped": step.was_skipped
+                        })
+                    })
+                    .collect();
+                let mut payload = json!({
+                    "status": "arrived_via_graph",
+                    "already_at_target": already_at_target,
+                    "active_package": active_package,
+                    "start_hash": Self::hex(report.start_hash),
+                    "target_hash": Self::hex(report.final_hash),
+                    "steps_executed": report.steps.len(),
+                    "total_elapsed_ms": report.total_elapsed_ms,
+                    "path_summary": summary
+                });
+                if !report.recovered_steps.is_empty() {
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert(
+                            "recovered_steps".to_string(),
+                            json!(report.recovered_steps),
+                        );
+                    }
+                }
+                McpToolResult::text(payload.to_string(), false)
+            }
+
+            ExploreOutcome::ExploredAndClicked {
+                matched_candidate,
+                scrolls_performed,
+                start_hash,
+                final_hash,
+                active_package,
+                screen_changed,
+                edge_recorded,
+                total_elapsed_ms,
+            } => McpToolResult::text(
+                json!({
+                    "status": "explored_and_clicked",
+                    "matched_candidate": matched_candidate,
+                    "scrolls_performed": scrolls_performed,
+                    "start_hash": Self::hex(*start_hash),
+                    "final_hash": Self::hex(*final_hash),
+                    "active_package": active_package,
+                    "screen_changed": screen_changed,
+                    "edge_recorded": edge_recorded,
+                    "total_elapsed_ms": total_elapsed_ms
+                })
+                .to_string(),
+                false,
+            ),
+
+            ExploreOutcome::RequiresConfirmation(req) => McpToolResult::text(
+                json!({
+                    "status": "requires_confirmation",
+                    "is_hazardous": true,
+                    "hazard_category": req.hazard_category.as_str(),
+                    "hazard_reason": req.hazard_reason,
+                    "blocked_step_index": req.step_index,
+                    "total_steps": req.total_steps,
+                    "steps_completed": req.steps_completed,
+                    "blocked_action": req.action_signature,
+                    "target_description": req.target_description,
+                    "current_hash": Self::hex(req.current_hash),
+                    "target_hash": Self::hex(req.target_hash),
+                    "message": "Irreversible action blocked pending human approval. Ask the user in chat to confirm, then re-run android_explore_and_click with confirmed: true."
+                })
+                .to_string(),
+                false,
+            ),
+
+            ExploreOutcome::SecureScreenTimeout {
+                reason,
+                active_package,
+                timeout_seconds,
+            } => McpToolResult::text(
+                json!({
+                    "status": "secure_screen_active",
+                    "code": "SECURE_SCREEN_ACTIVE",
+                    "reason": reason,
+                    "active_package": active_package,
+                    "timeout_seconds": timeout_seconds,
+                    "message": format!("Protected biometric/PIN screen remained locked past {timeout_seconds}s. Ask the user to unlock on the phone and retry.")
+                })
+                .to_string(),
+                true,
+            ),
+
+            ExploreOutcome::NeedsSelection {
+                query,
+                current_hash,
+                active_package,
+                scrolls_performed,
+                candidates,
+            } => McpToolResult::text(
+                json!({
+                    "status": "needs_selection",
+                    "query": query,
+                    "current_hash": Self::hex(*current_hash),
+                    "active_package": active_package,
+                    "scrolls_performed": scrolls_performed,
+                    "candidate_count": candidates.len(),
+                    "candidates": candidates,
+                    "message": "No confident live match (>=500) found. Select a candidate from 'candidates' or refine 'target'."
+                })
+                .to_string(),
+                false,
             ),
         }
     }

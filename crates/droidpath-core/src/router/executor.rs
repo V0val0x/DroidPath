@@ -79,6 +79,8 @@ pub struct MacroExecutionConfiguration {
     pub allow_hazardous_actions: bool,
     pub enable_forward_skip_recovery: bool,
     pub enable_overlay_swipe_dismiss: bool,
+    pub enable_smart_scroll_to_selector: bool,
+    pub record_edge_failures_on_timeout: bool,
     pub secure_handoff_timeout_secs: f64,
 }
 
@@ -91,6 +93,8 @@ impl Default for MacroExecutionConfiguration {
             allow_hazardous_actions: false,
             enable_forward_skip_recovery: true,
             enable_overlay_swipe_dismiss: true,
+            enable_smart_scroll_to_selector: true,
+            record_edge_failures_on_timeout: true,
             secure_handoff_timeout_secs: 60.0,
         }
     }
