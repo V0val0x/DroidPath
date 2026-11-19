@@ -1,0 +1,23 @@
+[package]
+name = "droidpath-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform Tauri v2 Desktop Client with embedded Android mirror, WebCodecs H.264 decoder, Agentic HUD, HITL confirmation, and Spatial Graph explorer"
+
+[lib]
+name = "droidpath_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono.workspace = true
+droidpath-core = { path = "../../../crates/droidpath-core" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tokio.workspace = true
+uuid.workspace = true

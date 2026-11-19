@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DroidPath — Cross-Platform Agentic HUD</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span class="brand-title">DroidPath</span>
+          <span class="brand-badge">v2.0 · Cross-Platform HUD</span>
+        </div>
+        <div class="device-controls">
+          <select id="device-select" title="Connected Android Devices">
+            <option value="">Scanning ADB devices...</option>
+          </select>
+          <button id="btn-refresh" class="btn btn-ghost" title="Refresh ADB devices">↻</button>
+          <button id="btn-connect" class="btn btn-primary">Connect &amp; Start HUD</button>
+          <button id="btn-disconnect" class="btn btn-danger hidden">Disconnect</button>
+        </div>
+        <div class="status-pills">
+          <span id="pill-daemon" class="pill pill-muted">Daemon: Offline</span>
+          <span id="pill-mirror" class="pill pill-muted">Mirror: Idle</span>
+          <button id="btn-mcp-toggle" class="pill pill-interactive" title="Toggle Embedded Loopback MCP HTTP/SSE Server">
+            MCP: Off
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <!-- Left Pane: Embedded Android Mirror + Integrated Agentic HUD -->
+        <section class="mirror-pane">
+          <div id="mirror-stage" class="mirror-stage" tabindex="0">
+            <canvas id="mirror-canvas" class="mirror-canvas"></canvas>
+            <img id="snapshot-img" class="mirror-canvas hidden" alt="Android Mirror Fallback" />
+
+            <div id="mirror-placeholder" class="mirror-placeholder">
+              <div class="placeholder-icon">📱</div>
+              <h2>Zero-Friction Android Mirror &amp; Agentic HUD</h2>
+              <p>Connect an Android device over USB or Wi-Fi ADB to stream live H.264 via WebCodecs, passively learn UI transitions by clicking, and watch A* routes execute in real time.</p>
+              <button id="btn-placeholder-connect" class="btn btn-primary">Connect First Device</button>
+            </div>
+
+            <!-- Integrated Cross-Platform Agentic HUD Overlay -->
+            <svg id="hud-svg" class="hud-svg" aria-hidden="true"></svg>
+
+            <!-- Passive Learning Pill -->
+            <div id="passive-toast" class="passive-toast hidden">
+              <span class="passive-dot"></span>
+              <span id="passive-text">Learned tap</span>
+            </div>
+
+            <!-- Floating Glassmorphic Agentic Status Toast -->
+            <div id="hud-toast" class="hud-toast hidden" data-phase="idle">
+              <span class="toast-indicator"></span>
+              <div class="toast-body">
+                <div id="hud-toast-title" class="toast-title"></div>
+                <div id="hud-toast-subtitle" class="toast-subtitle"></div>
+              </div>
+            </div>
+
+            <!-- Interactive HITL Confirmation Card (Payment / Destructive Guard) -->
+            <div id="hitl-card" class="hitl-card hidden">
+              <div class="hitl-header">
+                <span class="hitl-badge">⚠️ HITL APPROVAL REQUIRED</span>
+                <span id="hitl-category" class="hitl-cat">payment</span>
+              </div>
+              <div id="hitl-reason" class="hitl-reason"></div>
+              <div id="hitl-meta" class="hitl-meta"></div>
+              <div class="hitl-actions">
+                <button id="btn-hitl-approve" class="btn btn-warn">Approve &amp; Execute</button>
+                <button id="btn-hitl-cancel" class="btn btn-ghost">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Hardware & Passive Learning Control Bar -->
+          <div class="hardware-bar">
+            <button class="hw-btn" data-key="BACK" title="Android Back (Esc)">◁ Back</button>
+            <button class="hw-btn" data-key="HOME" title="Android Home">○ Home</button>
+            <button class="hw-btn" data-key="APP_SWITCH" title="Recents / App Switcher">▢ Recents</button>
+            <button class="hw-btn" data-key="POWER" title="Power">⏻ Power</button>
+            <div class="hw-divider"></div>
+            <label class="learn-toggle" title="Record your clicks &amp; swipes on the mirrored screen into the Spatial Graph">
+              <input type="checkbox" id="chk-passive-learn" checked />
+              <span>Passive Learning</span>
+            </label>
+            <span id="fps-badge" class="fps-badge">-- fps</span>
+          </div>
+        </section>
+
+        <!-- Right Pane: A* Router, Spatial Graph Explorer & Telemetry -->
+        <aside class="inspector-pane">
+          <div class="card">
+            <div class="card-title">Layer 3 · A* Symbolic Router</div>
+            <form id="nav-form" class="nav-form">
+              <input
+                id="nav-target-input"
+                type="text"
+                placeholder="Target screen or label (e.g. Night Light, Display)..."
+                autocomplete="off"
+              />
+              <button type="submit" id="btn-route" class="btn btn-primary">Route</button>
+            </form>
+            <div id="nav-result" class="nav-result hidden"></div>
+          </div>
+
+          <div class="card stats-grid">
+            <div class="stat-box">
+              <span class="stat-label">Screens</span>
+              <span id="stat-vertices" class="stat-value">0</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Edges</span>
+              <span id="stat-edges" class="stat-value">0</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Active App</span>
+              <span id="stat-package" class="stat-value mono truncate">—</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Canonical Hash</span>
+              <span id="stat-hash" class="stat-value mono truncate">—</span>
+            </div>
+          </div>
+
+          <div class="card graph-card">
+            <div class="card-header-row">
+              <span class="card-title">Spatial Graph Explorer</span>
+              <button id="btn-refresh-graph" class="btn btn-xs btn-ghost">Refresh</button>
+            </div>
+            <div class="graph-canvas-wrap">
+              <svg id="graph-svg" class="graph-svg" viewBox="0 0 420 280"></svg>
+              <div id="graph-empty" class="graph-empty">No screens learned yet. Click on the mirrored phone to map UI transitions automatically.</div>
+            </div>
+          </div>
+
+          <div class="card log-card">
+            <div class="card-header-row">
+              <span class="card-title">Live Telemetry &amp; Learning Feed</span>
+              <button id="btn-clear-log" class="btn btn-xs btn-ghost">Clear</button>
+            </div>
+            <div id="event-log" class="event-log"></div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

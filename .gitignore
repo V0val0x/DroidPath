@@ -1,10 +1,13 @@
 .DS_Store
-.build/
-.swiftpm/
-*.xcodeproj
+target/
 dist/
+node_modules/
+apps/droidpath-desktop/dist/
+apps/droidpath-desktop/node_modules/
+packages/droidpath-cli/node_modules/
 android-daemon/.gradle/
 android-daemon/build/
 android-daemon/.kotlin/
 android-daemon/local.properties
 shadow_graph.json
+*.log

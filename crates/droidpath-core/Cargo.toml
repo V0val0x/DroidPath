@@ -1,0 +1,23 @@
+[package]
+name = "droidpath-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform Shadow DOM client, Persistent Spatial Graph engine, A* UI Router, MCP bridge, and scrcpy H.264 stream controller for Android"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+fancy-regex.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+quick-xml.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
