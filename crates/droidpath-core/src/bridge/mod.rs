@@ -1910,10 +1910,16 @@ impl ShadowGraphBridge {
                 .await;
             let scroll_start = Instant::now();
 
+            let zero_fling = executor.supports_zero_fling_swipes(serial).await;
             let cx = ((scroll_rect.min_x + scroll_rect.max_x) / 2).max(1);
             let span_y = scroll_rect.max_y - scroll_rect.min_y;
-            let y_high = scroll_rect.min_y + (span_y * 72) / 100;
-            let y_low = scroll_rect.min_y + (span_y * 28) / 100;
+            let (high_pct, low_pct, swipe_dur_ms) = if zero_fling {
+                (80, 18, 145)
+            } else {
+                (72, 28, 500)
+            };
+            let y_high = scroll_rect.min_y + (span_y * high_pct) / 100;
+            let y_low = scroll_rect.min_y + (span_y * low_pct) / 100;
             let (start_y, end_y, dir_label) = if scrolling_down {
                 (y_high, y_low, "down")
             } else {
@@ -1926,7 +1932,7 @@ impl ShadowGraphBridge {
                 start_y,
                 cx,
                 end_y,
-                Some(500),
+                Some(swipe_dur_ms),
             );
 
             self.emit_macro_event(MacroExecutionEvent::RecoveryAction {
@@ -1986,8 +1992,39 @@ impl ShadowGraphBridge {
             }
 
             if opts.post_settle_quiescence_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(opts.post_settle_quiescence_ms.max(400)))
+                if zero_fling {
+                    // Drain any in-flight mid-swipe and post-ACTION_UP accessibility frames
+                    // until the Shadow DOM stream stays quiet (debounce + UiAutomation collect
+                    // takes ~70-95ms after ACTION_UP), ensuring we never record a mid-swipe hash.
+                    let quiet_ms = opts.post_settle_quiescence_ms.max(115);
+                    let max_drain_ms = quiet_ms.max(380);
+                    let hard_deadline = tokio::time::sleep(Duration::from_millis(max_drain_ms));
+                    let quiet_deadline = tokio::time::sleep(Duration::from_millis(quiet_ms));
+                    tokio::pin!(hard_deadline);
+                    tokio::pin!(quiet_deadline);
+                    loop {
+                        tokio::select! {
+                            _ = &mut hard_deadline => break,
+                            _ = &mut quiet_deadline => break,
+                            res = update_rx.recv() => {
+                                match res {
+                                    Ok(upd) if !upd.is_secure_screen_active => {
+                                        quiet_deadline
+                                            .as_mut()
+                                            .reset(tokio::time::Instant::now() + Duration::from_millis(quiet_ms));
+                                    }
+                                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(
+                        opts.post_settle_quiescence_ms.max(400),
+                    ))
                     .await;
+                }
             }
 
             // Record scroll transition edge into SpatialGraphEngine
@@ -2017,12 +2054,14 @@ impl ShadowGraphBridge {
                 // If mid-scroll deceleration frames consumed `pending_action` before the list
                 // settled, bridge `(before_hash -> settled_after_hash)` directly with `swipe_action`
                 // so A* has a continuous executable edge across scrolled screens (no implicit gap).
-                let resolved_after_hash = self
-                    .graph_engine
-                    .current_state_hash()
-                    .await
-                    .filter(|_| after_fp.layout_hash != before_fp.layout_hash)
-                    .unwrap_or(after_fp.layout_hash);
+                let resolved_after_hash = if after_fp.layout_hash == before_fp.layout_hash {
+                    before_hash
+                } else {
+                    self.graph_engine
+                        .current_state_hash()
+                        .await
+                        .unwrap_or(after_fp.layout_hash)
+                };
                 if resolved_after_hash != before_hash {
                     let neighbors = self.graph_engine.neighbors(before_hash).await;
                     let has_direct_exec = neighbors
@@ -2430,12 +2469,14 @@ impl ShadowGraphBridge {
         // If intermediate skeleton frames consumed `pending_action` before the final settled screen
         // finished inflating, bridge `(before_hash -> settled_final_hash)` directly with `action`
         // so A* has a clean executable edge without an implicit gap.
-        let resolved_final_hash = self
-            .graph_engine
-            .current_state_hash()
-            .await
-            .filter(|_| final_fp.layout_hash != before_fp.layout_hash)
-            .unwrap_or(final_fp.layout_hash);
+        let resolved_final_hash = if final_fp.layout_hash == before_fp.layout_hash {
+            before_hash
+        } else {
+            self.graph_engine
+                .current_state_hash()
+                .await
+                .unwrap_or(final_fp.layout_hash)
+        };
         if resolved_final_hash != before_hash {
             let neighbors = self.graph_engine.neighbors(before_hash).await;
             let has_direct_exec = neighbors
@@ -2457,16 +2498,15 @@ impl ShadowGraphBridge {
             }
         }
 
-        let edge_recorded = if processed_edge || self.graph_engine.edge_count().await > edges_before {
+        let edge_recorded = if resolved_final_hash == before_hash {
+            false
+        } else if processed_edge || self.graph_engine.edge_count().await > edges_before {
             true
-        } else if resolved_final_hash != before_hash {
+        } else {
             let neighbors = self.graph_engine.neighbors(before_hash).await;
             neighbors.iter().any(|e| e.to_hash == resolved_final_hash)
-        } else {
-            false
         };
-        let screen_changed =
-            final_fp.layout_hash != before_fp.layout_hash || resolved_final_hash != before_hash;
+        let screen_changed = resolved_final_hash != before_hash;
 
         Ok(ExploreOutcome::ExploredAndClicked {
             matched_candidate: candidate,
@@ -2559,6 +2599,13 @@ impl ShadowGraphBridge {
             if skip_ignored && Self::is_ignored_node(node, ignored_packages) {
                 continue;
             }
+            if MacroExecutionEngine::is_node_clipped_by_scrollable_ancestor(
+                index,
+                node,
+                ignored_packages,
+            ) {
+                continue;
+            }
             let area = ShadowTreeIndex::parse_bounds_rect(&node.bounds)
                 .map(|r| r.area())
                 .unwrap_or(i64::MAX);
@@ -2629,6 +2676,13 @@ impl ShadowGraphBridge {
                 continue;
             }
             if skip_ignored && Self::is_ignored_node(node, ignored_packages) {
+                continue;
+            }
+            if MacroExecutionEngine::is_node_clipped_by_scrollable_ancestor(
+                index,
+                node,
+                ignored_packages,
+            ) {
                 continue;
             }
             let effective_clickable =

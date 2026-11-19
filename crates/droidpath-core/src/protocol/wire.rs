@@ -29,6 +29,14 @@ pub struct WireHelloPayload {
     pub sdk_int: i32,
     pub device_model: String,
     pub pid: i64,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+impl WireHelloPayload {
+    pub fn supports_native_input(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "input")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +184,18 @@ pub struct WireSecureScreenPayload {
     pub timestamp_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireInputResultPayload {
+    pub id: u64,
+    pub cmd: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub elapsed_ms: i64,
+    #[serde(rename = "ts_ms")]
+    pub timestamp_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireMessage {
     Hello(WireHelloPayload),
@@ -185,12 +205,33 @@ pub enum WireMessage {
     Error(WireErrorPayload),
     Pong(WirePongPayload),
     SecureScreen(WireSecureScreenPayload),
+    InputResult(WireInputResultPayload),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonCommand {
     Snapshot,
     Ping,
-    SetDebounce { ms: i32 },
+    SetDebounce {
+        ms: i32,
+    },
     Shutdown,
+    Tap {
+        id: u64,
+        x: i32,
+        y: i32,
+    },
+    Swipe {
+        id: u64,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        duration_ms: i32,
+        hold_ms: i32,
+    },
+    Keyevent {
+        id: u64,
+        keycode: i32,
+    },
 }

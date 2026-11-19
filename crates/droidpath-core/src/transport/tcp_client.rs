@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,11 +9,13 @@ use chrono::Utc;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::protocol::{DaemonCommand, NdjsonWireCodec, WireCodec, WireMessage};
+use crate::protocol::{
+    DaemonCommand, NdjsonWireCodec, WireCodec, WireInputResultPayload, WireMessage,
+};
 
 use super::endpoint::{
     DaemonClientError, DaemonClientMetrics, DaemonConnectionState, DaemonEndpointConfiguration,
@@ -32,6 +36,8 @@ struct ClientInner {
     before_reconnect: Option<BeforeReconnectHook>,
 }
 
+type InputWaiter = oneshot::Sender<Result<WireInputResultPayload, DaemonClientError>>;
+
 /// Persistent cross-platform Tokio TCP client for `android-daemon` (`127.0.0.1:27189`).
 /// Preserves strict TCP chunk framing order, detects silent dead connections via heartbeat
 /// watchdog, and reconnects with jittered exponential backoff.
@@ -42,6 +48,8 @@ pub struct DaemonTcpClient {
     state_watch: Arc<RwLock<DaemonConnectionState>>,
     msg_tx: broadcast::Sender<WireMessage>,
     state_tx: broadcast::Sender<DaemonConnectionState>,
+    next_input_id: AtomicU64,
+    pending_inputs: Arc<Mutex<HashMap<u64, InputWaiter>>>,
 }
 
 impl DaemonTcpClient {
@@ -68,6 +76,8 @@ impl DaemonTcpClient {
             state_watch: Arc::new(RwLock::new(DaemonConnectionState::Disconnected)),
             msg_tx,
             state_tx,
+            next_input_id: AtomicU64::new(1),
+            pending_inputs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -144,6 +154,9 @@ impl DaemonTcpClient {
         }
         drop(inner);
 
+        self.fail_pending_inputs(DaemonClientError::NotConnected)
+            .await;
+
         if self.config.port != 0 {
             *self.state_watch.write().await = DaemonConnectionState::Connecting;
             let _ = self.state_tx.send(DaemonConnectionState::Connecting);
@@ -167,6 +180,7 @@ impl DaemonTcpClient {
         inner.state = DaemonConnectionState::Stopped;
         drop(inner);
 
+        self.fail_pending_inputs(DaemonClientError::Stopped).await;
         *self.state_watch.write().await = DaemonConnectionState::Stopped;
         let _ = self.state_tx.send(DaemonConnectionState::Stopped);
     }
@@ -204,6 +218,132 @@ impl DaemonTcpClient {
 
     pub async fn set_debounce(&self, ms: i32) -> Result<(), DaemonClientError> {
         self.send(DaemonCommand::SetDebounce { ms }).await
+    }
+
+    pub async fn supports_native_input(&self) -> bool {
+        matches!(
+            &*self.state_watch.read().await,
+            DaemonConnectionState::Connected { hello: Some(h) } if h.supports_native_input()
+        )
+    }
+
+    pub async fn inject_tap(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Result<WireInputResultPayload, DaemonClientError> {
+        let id = self.next_input_id.fetch_add(1, Ordering::Relaxed);
+        self.send_input_and_await(id, DaemonCommand::Tap { id, x, y }, Duration::from_millis(1500))
+            .await
+    }
+
+    pub async fn inject_swipe(
+        &self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        duration_ms: i32,
+        hold_ms: i32,
+    ) -> Result<WireInputResultPayload, DaemonClientError> {
+        let id = self.next_input_id.fetch_add(1, Ordering::Relaxed);
+        let timeout_ms = ((duration_ms.max(0) as u64) + (hold_ms.max(0) as u64) + 1500).max(2000);
+        self.send_input_and_await(
+            id,
+            DaemonCommand::Swipe {
+                id,
+                x1,
+                y1,
+                x2,
+                y2,
+                duration_ms,
+                hold_ms,
+            },
+            Duration::from_millis(timeout_ms),
+        )
+        .await
+    }
+
+    pub async fn inject_keyevent(
+        &self,
+        keycode: i32,
+    ) -> Result<WireInputResultPayload, DaemonClientError> {
+        let id = self.next_input_id.fetch_add(1, Ordering::Relaxed);
+        self.send_input_and_await(
+            id,
+            DaemonCommand::Keyevent { id, keycode },
+            Duration::from_millis(1500),
+        )
+        .await
+    }
+
+    async fn send_input_and_await(
+        &self,
+        id: u64,
+        command: DaemonCommand,
+        timeout: Duration,
+    ) -> Result<WireInputResultPayload, DaemonClientError> {
+        if !self.supports_native_input().await {
+            let state = self.state_watch.read().await.clone();
+            return Err(match state {
+                DaemonConnectionState::Stopped => DaemonClientError::Stopped,
+                DaemonConnectionState::Connected { .. } => DaemonClientError::NotSupported,
+                _ => DaemonClientError::NotConnected,
+            });
+        }
+
+        let (tx, rx) = oneshot::channel();
+        // Race-free order: register waiter BEFORE writing command to socket.
+        self.pending_inputs.lock().await.insert(id, tx);
+
+        if let Err(err) = self.send(command).await {
+            self.pending_inputs.lock().await.remove(&id);
+            return Err(err);
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(result))) => {
+                if result.ok {
+                    Ok(result)
+                } else {
+                    Err(DaemonClientError::InputFailed(
+                        result
+                            .error
+                            .unwrap_or_else(|| "daemon_input_returned_false".to_string()),
+                    ))
+                }
+            }
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => Err(DaemonClientError::NotConnected),
+            Err(_) => {
+                self.pending_inputs.lock().await.remove(&id);
+                Err(DaemonClientError::InputTimeout)
+            }
+        }
+    }
+
+    async fn fail_pending_inputs(&self, err: DaemonClientError) {
+        let waiters: Vec<InputWaiter> = {
+            let mut guard = self.pending_inputs.lock().await;
+            guard.drain().map(|(_, tx)| tx).collect()
+        };
+        for tx in waiters {
+            let err_clone = match &err {
+                DaemonClientError::Stopped => DaemonClientError::Stopped,
+                DaemonClientError::NotConnected => DaemonClientError::NotConnected,
+                DaemonClientError::NotSupported => DaemonClientError::NotSupported,
+                DaemonClientError::InputTimeout => DaemonClientError::InputTimeout,
+                DaemonClientError::SendFailed(s) => DaemonClientError::SendFailed(s.clone()),
+                DaemonClientError::InputFailed(s) => DaemonClientError::InputFailed(s.clone()),
+                DaemonClientError::InvalidEndpoint { host, port } => {
+                    DaemonClientError::InvalidEndpoint {
+                        host: host.clone(),
+                        port: *port,
+                    }
+                }
+            };
+            let _ = tx.send(Err(err_clone));
+        }
     }
 
     async fn set_state(&self, gen: u64, new_state: DaemonConnectionState) -> bool {
@@ -314,6 +454,8 @@ impl DaemonTcpClient {
 
             let disconnect_reason = self.read_session(gen, &mut reader).await;
             writer_task.abort();
+            self.fail_pending_inputs(DaemonClientError::NotConnected)
+                .await;
 
             {
                 let mut inner = self.inner.lock().await;
@@ -397,8 +539,17 @@ impl DaemonTcpClient {
             }
 
             for msg in decoded_msgs {
-                if let WireMessage::Hello(ref hello) = msg {
-                    hello_update = Some(hello.clone());
+                match &msg {
+                    WireMessage::Hello(hello) => {
+                        hello_update = Some(hello.clone());
+                    }
+                    WireMessage::InputResult(res) => {
+                        let waiter = self.pending_inputs.lock().await.remove(&res.id);
+                        if let Some(tx) = waiter {
+                            let _ = tx.send(Ok(res.clone()));
+                        }
+                    }
+                    _ => {}
                 }
                 let _ = self.msg_tx.send(msg);
             }

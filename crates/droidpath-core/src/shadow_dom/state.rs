@@ -283,7 +283,7 @@ impl ShadowDomState {
                 self.inner.write().await.last_error = Some(err);
             }
 
-            WireMessage::Pong(_) => {
+            WireMessage::Pong(_) | WireMessage::InputResult(_) => {
                 let mut inner = self.inner.write().await;
                 if inner.has_session_snapshot {
                     inner.last_received_at = Some(now);

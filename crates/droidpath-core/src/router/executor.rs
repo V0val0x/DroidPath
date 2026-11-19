@@ -69,6 +69,13 @@ fn format_opt_hash(h: Option<u64>) -> String {
 #[async_trait]
 pub trait MacroActionExecutor: Send + Sync {
     async fn execute(&self, action: &AttributedUIAction, serial: &str) -> Result<(), PathDeviationError>;
+
+    /// Returns `true` when this executor currently injects touch gestures via native zero-fling
+    /// daemon `UiAutomation.injectInputEvent` (with ease-out + terminal hold), allowing wider
+    /// scroll strokes, ~145ms drags, and tight post-swipe quiescence.
+    async fn supports_zero_fling_swipes(&self, _serial: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
