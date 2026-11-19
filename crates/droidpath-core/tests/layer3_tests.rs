@@ -115,6 +115,7 @@ fn test_astar_pathfinder_optimal_routing_filtering_max_steps_and_heuristic_steer
             last_traversed_at: now,
             is_hazardous: false,
             hazard_reason: None,
+            consecutive_failures: 0,
         }
     };
 

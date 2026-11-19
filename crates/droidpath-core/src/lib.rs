@@ -12,7 +12,10 @@ pub mod spatial_graph;
 pub mod transport;
 
 pub use adb::{DroidPathActionExecutor, DroidPathAdbError, DroidPathAdbRunner, DroidPathDevice};
-pub use bridge::{DaemonRecoveryHook, RouteExecuteOptions, ShadowGraphBridge, ShadowNavigationOutcome};
+pub use bridge::{
+    DaemonRecoveryHook, ExploreCandidate, ExploreOptions, ExploreOutcome, RouteExecuteOptions,
+    ShadowGraphBridge, ShadowNavigationOutcome,
+};
 pub use manager::{
     DaemonDeployReport, DaemonLauncherHook, DroidPathGraphStats, DroidPathManager,
     DroidPathPersistenceCoordinator, PortForwarderHook,

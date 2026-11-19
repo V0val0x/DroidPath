@@ -21,14 +21,15 @@
 
 ### Вариант A: `npx droidpath` (Windows · Linux · macOS)
 
-Содержит встроенный `android-daemon.jar` — одной командой пушит демон с SHA-256 кешированием (`adb push`), пробрасывает порт (`adb forward`), запускает `app_process` и автоматически прописывает MCP в Cursor и Claude Desktop:
+Содержит встроенный `android-daemon.jar` — одной командой пушит демон с SHA-256 кешированием (`adb push`), пробрасывает порт (`adb forward`), запускает `app_process` и автоматически прописывает MCP в Cursor, Claude Desktop/Code, Gemini CLI, Antigravity, LM Studio и локальных ИИ-рантаймах (а также идемпотентные правила агента по умолчанию, либо пропуск через `--no-rules`):
 
 ```bash
-# Старт в 1 клик: деплой демона + авто-настройка MCP (Cursor / Claude Desktop)
+# Старт в 1 клик: деплой демона + авто-настройка MCP и правил (Cursor / Claude / Gemini / Antigravity)
 npx droidpath start --configure
 
 # Отдельные команды:
-npx droidpath init --client all       # Авто-настройка Cursor и Claude Desktop MCP JSON
+npx droidpath init --client all       # Авто-настройка Cursor, Claude, Gemini CLI, Antigravity, локальных ИИ и правил агента
+npx droidpath rules --format local    # Установка .cursorrules/CLAUDE.md/GEMINI.md или экспорт промпта для локальных LLM
 npx droidpath daemon deploy           # SHA-256 adb push + adb forward + app_process
 npx droidpath mcp --stdio             # Запуск нативного Rust MCP-сервера с авто-деплоем демона
 npx droidpath doctor                  # Полная диагностика ADB, устройства, демона и графа
@@ -79,14 +80,16 @@ flowchart LR
 
 1. **Layer 1 — Headless Kotlin Shadow DOM демон (`android-daemon/`):**
    - Автономный **single-DEX JAR (650 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK.
+   - Реализует **Privacy by Design** на устройстве: привязывает TCP-сокет строго к локальной петле `127.0.0.1` (`adb forward`) и маскирует `isPassword` / чувствительные поля ввода на `"***"` до отправки по TCP (`:27189`).
    - Стримит полные снимки, инкрементальные NDJSON-диффы, привязку к основному окну приложения (`TYPE_APPLICATION`) под оверлеями `com.android.systemui` и события `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` при `FLAG_SECURE` / биометрии по TCP (`:27189`).
 
 2. **Layer 2 — Кроссплатформенное ядро на Rust (`crates/droidpath-core`):**
-   - Побитово совместимый FNV-1a 64-bit `ScreenLayoutHasher`: очищает часы, даты, e-commerce токены (`<PRICE>`, `<ETA>`, `<WEIGHT>`), декоративные `ImageView` баннеры и системные push-баннеры `com.android.systemui`.
-   - `SpatialGraphEngine` строит мультиграф с компактификацией по Жаккару (`>= 0.90`), классификацией опасных рёбер (`HazardousActionClassifier`), ациклическим остовным DAG и **100% двусторонней совместимостью `shadow_graph.json`** с Swift `AndOnMac`.
+   - Побитово совместимый FNV-1a 64-bit `ScreenLayoutHasher`: очищает часы, даты, e-commerce токены (`<PRICE>`, `<ETA>`, `<WEIGHT>`), номера банковских карт по алгоритму Луна (`<CARD>`) и контекстные 2FA/OTP-коды (`<OTP>`), декоративные `ImageView` баннеры и системные push-баннеры `com.android.systemui`.
+   - `SpatialGraphEngine` строит мультиграф с компактификацией по Жаккару (`>= 0.90`), классификацией опасных рёбер (`HazardousActionClassifier`), деградацией и автоочисткой нестабильных рёбер (`consecutiveFailures`), ациклическим остовным DAG и **100% двусторонней совместимостью `shadow_graph.json`** с Swift `AndOnMac`.
 
 3. **Layer 3 — A\* роутер, MCP CLI (`crates/droidpath-mcp`) и Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
-   - `AStarPathfinder` + `MacroExecutionEngine` с forward-skip восстановлением (`1 -> 3/4`), перепланированием после скролла, универсальным закрытием промо-попапов (`UniversalDismissDetector`), смахиванием пуш-уведомлений, HITL-подтверждением опасных действий (`requires_confirmation` / `confirmed: true`) и паузой на `FLAG_SECURE` (таймаут ожидания 60 с по умолчанию).
+   - `AStarPathfinder` + `MacroExecutionEngine` с cold-start исследованием (`android_explore_and_click` / `auto_explore: true`), forward-skip восстановлением (`1 -> 3/4`), размоткой стека экранов `Back-to-Root`, поисковым скроллом `Smart Scroll-to-Selector`, перепланированием после скролла, универсальным закрытием промо-попапов (`UniversalDismissDetector`), смахиванием пуш-уведомлений, HITL-подтверждением опасных действий (`requires_confirmation` / `confirmed: true`) и паузой на `FLAG_SECURE` (таймаут ожидания 60 с по умолчанию).
+   - **LLM Onboarding и правила:** включает готовые `.cursorrules`, `CLAUDE.md`, `GEMINI.md` и `docs/system_prompt.md` (идемпотентно устанавливаются через `npx droidpath init` / `npx droidpath rules` или пропускаются флагом `--no-rules`), чтобы облачные и локальные модели работали через Shadow DOM и не спамили `android_screenshot`.
    - **Tauri v2 Desktop HUD** объединяет встроенное зеркало экрана (`scrcpy-server` H.264 -> WebCodecs `<canvas>` с автоматическим fallback на `screencap`), трёхцветный **Agentic HUD** (**Красный** — автономная работа, **Жёлтый** — ожидание подтверждения HITL с интерактивными кнопками *Approve / Cancel*, **Синий** — ожидание биометрии / `FLAG_SECURE`) и интерактивный SVG-инспектор графа в одном окне — работает на **Windows, macOS и Linux Wayland/X11** и сохраняет пассивное обучение кликами.
 
 ---
@@ -148,7 +151,8 @@ npm --prefix packages/droidpath-cli run sync-daemon
 
 | Инструмент | Описание |
 | :--- | :--- |
-| `android_navigate_to_node` | A\* маршрутизация к целевому тексту, `resource-id`, пакету или каноническому хешу (`0x...`), включая HITL `confirmed: true` |
+| `android_navigate_to_node` | A\* маршрутизация к целевому тексту, `resource-id`, пакету или каноническому хешу (`0x...`), включая cold-start `auto_explore: true` и HITL `confirmed: true` |
+| `android_explore_and_click` | Dynamic Auto-Explore без предварительной записи графа: скоринг живого Shadow DOM, поисковый скролл со сменой направления у дна, клик и достраивание рёбер DAG на лету (либо топ-20 PII-очищенных `candidates`) |
 | `android_get_ui_tree` | Чтение дерева UI из быстрого Shadow DOM потока (с fallback на `uiautomator`) |
 | `android_graph_stats` | Статистика графа: число вершин/рёбер, текущий хеш, состояние демона, путь сохранения |
 | `android_list_devices` | Список подключённых Android-устройств по USB и Wi-Fi ADB |

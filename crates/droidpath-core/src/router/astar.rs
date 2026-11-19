@@ -151,7 +151,10 @@ impl AStarPathfinder {
     ) -> usize {
         let mut outgoing: HashMap<u64, Vec<u64>> = HashMap::new();
         for edge in &graph.edges {
-            if edge.action.is_none() || edge.to_hash == edge.from_hash {
+            if edge.action.is_none()
+                || edge.to_hash == edge.from_hash
+                || edge.consecutive_failures >= 5
+            {
                 continue;
             }
             outgoing.entry(edge.from_hash).or_default().push(edge.to_hash);
@@ -211,7 +214,10 @@ impl AStarPathfinder {
 
         let mut outgoing: HashMap<u64, Vec<&ScreenTransitionEdge>> = HashMap::new();
         for edge in &graph.edges {
-            if edge.action.is_none() || edge.to_hash == edge.from_hash {
+            if edge.action.is_none()
+                || edge.to_hash == edge.from_hash
+                || edge.consecutive_failures >= 5
+            {
                 continue;
             }
             if spanning_tree_only && !edge.is_spanning_tree_edge {
@@ -393,7 +399,9 @@ impl AStarPathfinder {
         } else {
             0.03 / (edge.traversal_count.max(1) as f64)
         };
-        self.configuration.min_step_cost + latency_term + reliability_term
+        let base_cost = self.configuration.min_step_cost + latency_term + reliability_term;
+        let decay_multiplier = 1.0 + 0.75 * f64::from(edge.consecutive_failures.max(0));
+        base_cost * decay_multiplier
     }
 
     fn effective_tokens(vertex: &ScreenStateVertex) -> BTreeSet<String> {

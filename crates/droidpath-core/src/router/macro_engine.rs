@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +34,12 @@ enum SettleOutcome {
         matched_by_exact_hash: bool,
     },
     InterruptedBySecureScreen,
+}
+
+enum SmartScrollStepOutcome {
+    Found(Box<(AttributedUIAction, ShadowUINode)>),
+    Moved,
+    BoundaryOrUnavailable,
 }
 
 /// Race-free asynchronous state machine that sequentially executes `[ScreenTransitionEdge]` paths,
@@ -264,6 +271,21 @@ impl MacroExecutionEngine {
             let (mut resolved_action, mut matched_node) =
                 self.resolve_live_action_with_node(raw_action).await;
 
+            // Smart Scroll-to-Selector: if tap selector is off-screen inside a scrollable container,
+            // perform up to 2 search scrolls (down / reverse up at bottom) to reveal & lock onto the node.
+            if self.configuration.enable_smart_scroll_to_selector
+                && matched_node.is_none()
+                && raw_action.kind == UIActionKind::Tap
+            {
+                if let Some((scrolled_action, scrolled_node)) = self
+                    .smart_scroll_to_selector(raw_action, serial, &mut recovered_steps)
+                    .await?
+                {
+                    resolved_action = scrolled_action;
+                    matched_node = Some(scrolled_node);
+                }
+            }
+
             // Hazardous / irreversible transaction HITL check (#2, Variant A)
             let live_label = matched_node.as_ref().map(|n| {
                 if !n.text.is_empty() {
@@ -378,7 +400,7 @@ impl MacroExecutionEngine {
             });
 
             let step_start = Instant::now();
-            let settle_outcome = self
+            let settle_res = self
                 .execute_and_wait_for_settle(
                     step_index,
                     &resolved_action,
@@ -387,7 +409,17 @@ impl MacroExecutionEngine {
                     update_rx,
                     secure_rx,
                 )
-                .await?;
+                .await;
+            let settle_outcome = match settle_res {
+                Ok(outcome) => outcome,
+                Err(err @ PathDeviationError::StepTimeout { .. }) => {
+                    if self.configuration.record_edge_failures_on_timeout {
+                        let _ = self.graph_engine.record_edge_failure(edge.id).await;
+                    }
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
+            };
 
             let (matched_idx, settled_hash, settled_exact) = match settle_outcome {
                 SettleOutcome::Settled {
@@ -400,10 +432,23 @@ impl MacroExecutionEngine {
                     if self.await_secure_handoff_if_active().await? {
                         recovered_steps.push("secure_handoff".to_string());
                     }
-                    self.settle_after_secure_handoff(step_index, &suffix_targets, last_settled_hash)
-                        .await?
+                    match self
+                        .settle_after_secure_handoff(step_index, &suffix_targets, last_settled_hash)
+                        .await
+                    {
+                        Ok(settled) => settled,
+                        Err(err @ PathDeviationError::StepTimeout { .. }) => {
+                            if self.configuration.record_edge_failures_on_timeout {
+                                let _ = self.graph_engine.record_edge_failure(edge.id).await;
+                            }
+                            return Err(err);
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
             };
+
+            self.graph_engine.record_edge_success(edge.id).await;
 
             let elapsed_ms = step_start.elapsed().as_millis() as u64;
             last_settled_hash = settled_hash;
@@ -470,8 +515,15 @@ impl MacroExecutionEngine {
             step_index = matched_idx + 1;
 
             if step_index < path.len() && self.configuration.post_settle_quiescence_ms > 0 {
+                // Wait for 120Hz RecyclerView fling deceleration before a subsequent tap so Android
+                // reaches SCROLL_STATE_IDLE instead of swallowing the tap as a fling-brake touch.
+                let next_is_swipe = path[step_index]
+                    .action
+                    .as_ref()
+                    .is_some_and(|a| a.kind == UIActionKind::Swipe);
                 let quiescence_ms = if resolved_action.kind == UIActionKind::Swipe {
-                    self.configuration.post_settle_quiescence_ms.max(280)
+                    let min_wait = if next_is_swipe { 280 } else { 480 };
+                    self.configuration.post_settle_quiescence_ms.max(min_wait)
                 } else {
                     self.configuration.post_settle_quiescence_ms
                 };
@@ -846,6 +898,271 @@ impl MacroExecutionEngine {
             });
         }
         union_rect
+    }
+
+    /// Finds the largest visible non-system `scrollable` container bounds on screen.
+    pub fn largest_scrollable_rect(
+        index: &ShadowTreeIndex,
+        ignored_packages: &HashSet<String>,
+    ) -> Option<BoundsRect> {
+        let skip_ignored = !ignored_packages.contains(&index.active_package);
+        let mut best: Option<BoundsRect> = None;
+
+        for node in &index.ordered_nodes {
+            if !node.visible || !node.scrollable {
+                continue;
+            }
+            if skip_ignored
+                && (!node.package_name.is_empty() && ignored_packages.contains(&node.package_name)
+                    || ignored_packages
+                        .iter()
+                        .any(|pkg| node.resource_id.starts_with(&format!("{pkg}:"))))
+            {
+                continue;
+            }
+            // Skip horizontal-only pagers and launcher home-screen workspaces where a vertical
+            // downward swipe pulls down the Android Notification Shade instead of scrolling a list.
+            let cls_lower = node.class_name.to_lowercase();
+            if cls_lower.contains("horizontalscrollview") || cls_lower.contains("viewpager") {
+                continue;
+            }
+            let rid_lower = node.resource_id.to_lowercase();
+            if rid_lower.ends_with(":id/workspace")
+                || rid_lower.ends_with("/workspace")
+                || rid_lower.ends_with(":id/hotseat")
+                || rid_lower.ends_with("/hotseat")
+                || rid_lower.ends_with(":id/smartspace_card_pager")
+                || rid_lower.ends_with("/smartspace_card_pager")
+            {
+                continue;
+            }
+            let Some(rect) = ShadowTreeIndex::parse_bounds_rect(&node.bounds) else {
+                continue;
+            };
+            let width = rect.max_x - rect.min_x;
+            let height = rect.max_y - rect.min_y;
+            if width < 120 || height < 120 {
+                continue;
+            }
+            if best.map(|b| rect.area() > b.area()).unwrap_or(true) {
+                best = Some(rect);
+            }
+        }
+        best
+    }
+
+    /// Extracts an ordered signature of visible labeled items inside `container` to detect scroll movement vs list boundaries.
+    pub fn scroll_viewport_signature(
+        index: &ShadowTreeIndex,
+        container: BoundsRect,
+        ignored_packages: &HashSet<String>,
+    ) -> Vec<(String, i32)> {
+        let skip_ignored = !ignored_packages.contains(&index.active_package);
+        let mut items = Vec::new();
+        for node in &index.ordered_nodes {
+            if !node.visible {
+                continue;
+            }
+            if skip_ignored
+                && (!node.package_name.is_empty() && ignored_packages.contains(&node.package_name)
+                    || ignored_packages
+                        .iter()
+                        .any(|pkg| node.resource_id.starts_with(&format!("{pkg}:"))))
+            {
+                continue;
+            }
+            if !container.contains(node.center_x, node.center_y) {
+                continue;
+            }
+            let label = if !node.text.is_empty() {
+                &node.text
+            } else if !node.content_desc.is_empty() {
+                &node.content_desc
+            } else {
+                continue;
+            };
+            items.push((label.clone(), node.center_y));
+        }
+        items
+    }
+
+    /// Performs controlled search scrolls (up to 2 downward; if not found, reverses upward to cover
+    /// items positioned above a mid-scroll or bottom-positioned viewport) when a tap selector is absent
+    /// from the currently visible viewport of a scrollable list.
+    async fn smart_scroll_to_selector(
+        &self,
+        raw_action: &AttributedUIAction,
+        serial: &str,
+        recovered_steps: &mut Vec<String>,
+    ) -> Result<Option<(AttributedUIAction, ShadowUINode)>, PathDeviationError> {
+        let has_selector = raw_action
+            .selector_text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+            || raw_action
+                .selector_resource_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+            || raw_action
+                .selector_content_desc
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+        if !has_selector {
+            return Ok(None);
+        }
+
+        // Phase 1: Scroll downward (up to 2 attempts, stopping early on bottom boundary).
+        let mut down_moves = 0usize;
+        for attempt in 1..=2usize {
+            match self
+                .perform_smart_scroll_step(raw_action, serial, true, attempt, 2)
+                .await?
+            {
+                SmartScrollStepOutcome::Found(found) => {
+                    recovered_steps.push(format!("smart_scroll_to_selector:down:{attempt}"));
+                    return Ok(Some(*found));
+                }
+                SmartScrollStepOutcome::Moved => {
+                    down_moves += 1;
+                }
+                SmartScrollStepOutcome::BoundaryOrUnavailable => {
+                    break;
+                }
+            }
+        }
+
+        // Phase 2: Reverse upward to recover targets above a mid-scroll or bottom viewport.
+        let up_budget = (down_moves + 1).clamp(2, 3);
+        for attempt in 1..=up_budget {
+            match self
+                .perform_smart_scroll_step(raw_action, serial, false, attempt, up_budget)
+                .await?
+            {
+                SmartScrollStepOutcome::Found(found) => {
+                    recovered_steps.push(format!("smart_scroll_to_selector:up:{attempt}"));
+                    return Ok(Some(*found));
+                }
+                SmartScrollStepOutcome::Moved => {}
+                SmartScrollStepOutcome::BoundaryOrUnavailable => {
+                    break;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn perform_smart_scroll_step(
+        &self,
+        raw_action: &AttributedUIAction,
+        serial: &str,
+        scrolling_down: bool,
+        attempt: usize,
+        budget: usize,
+    ) -> Result<SmartScrollStepOutcome, PathDeviationError> {
+        let Some(live_index) = self.dom_state.current_index().await else {
+            return Ok(SmartScrollStepOutcome::BoundaryOrUnavailable);
+        };
+        let Some(scroll_rect) =
+            Self::largest_scrollable_rect(&live_index, &self.hasher.ignored_packages)
+        else {
+            return Ok(SmartScrollStepOutcome::BoundaryOrUnavailable);
+        };
+
+        let before_hash = self.hasher.fingerprint(&live_index).layout_hash;
+        let before_sig = Self::scroll_viewport_signature(
+            &live_index,
+            scroll_rect,
+            &self.hasher.ignored_packages,
+        );
+
+        let cx = ((scroll_rect.min_x + scroll_rect.max_x) / 2).max(1);
+        let span_y = scroll_rect.max_y - scroll_rect.min_y;
+        let y_high = scroll_rect.min_y + (span_y * 72) / 100;
+        let y_low = scroll_rect.min_y + (span_y * 28) / 100;
+        let (start_y, end_y, dir_label) = if scrolling_down {
+            (y_high, y_low, "down")
+        } else {
+            (y_low, y_high, "up")
+        };
+
+        let swipe_action = AttributedUIAction::swipe(
+            format!("Smart scroll {dir_label} for '{}'", raw_action.target_description),
+            cx,
+            start_y,
+            cx,
+            end_y,
+            Some(500),
+        );
+
+        self.emit(MacroExecutionEvent::RecoveryAction {
+            kind: "smart_scroll_to_selector".to_string(),
+            detail: format!(
+                "Scrolling {dir_label} ({attempt}/{budget}) to reveal '{}'",
+                raw_action.target_description
+            ),
+        });
+
+        // Subscribe BEFORE swipe and explicitly do NOT call graph_engine.record_pending_action
+        let mut update_rx = self.dom_state.subscribe_updates();
+        self.executor.execute(&swipe_action, serial).await?;
+
+        let wait_ms = self.configuration.step_timeout_ms.clamp(150, 800);
+        let deadline = tokio::time::sleep(Duration::from_millis(wait_ms));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                res = update_rx.recv() => {
+                    match res {
+                        Ok(upd) => {
+                            if upd.is_secure_screen_active {
+                                continue;
+                            }
+                            let next_hash = self.hasher.fingerprint(&upd.index).layout_hash;
+                            let next_sig = Self::scroll_viewport_signature(
+                                &upd.index,
+                                scroll_rect,
+                                &self.hasher.ignored_packages,
+                            );
+                            if next_hash != before_hash || next_sig != before_sig {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+
+        if self.configuration.post_settle_quiescence_ms > 0 {
+            let q_ms = self.configuration.post_settle_quiescence_ms.max(400);
+            tokio::time::sleep(Duration::from_millis(q_ms)).await;
+        }
+
+        let (updated_act, matched) = self.resolve_live_action_with_node(raw_action).await;
+        if let Some(node) = matched {
+            return Ok(SmartScrollStepOutcome::Found(Box::new((updated_act, node))));
+        }
+
+        if let Some(after_index) = self.dom_state.current_index().await {
+            let after_hash = self.hasher.fingerprint(&after_index).layout_hash;
+            let after_sig = Self::scroll_viewport_signature(
+                &after_index,
+                scroll_rect,
+                &self.hasher.ignored_packages,
+            );
+            if after_hash == before_hash && after_sig == before_sig {
+                return Ok(SmartScrollStepOutcome::BoundaryOrUnavailable);
+            }
+            return Ok(SmartScrollStepOutcome::Moved);
+        }
+
+        Ok(SmartScrollStepOutcome::BoundaryOrUnavailable)
     }
 
     async fn resolve_live_action_with_node(

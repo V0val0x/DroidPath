@@ -14,11 +14,19 @@ import {
   validateSerial,
 } from "../src/adb.mjs";
 import { releaseAssetName } from "../src/binary-resolver.mjs";
-import { parseCliArgs, runCli } from "../src/index.mjs";
+import { parseCliArgs, runCli, expandClients } from "../src/index.mjs";
 import {
+  RULES_END_MARKER,
+  RULES_START_MARKER,
+  buildCompactLocalSystemPrompt,
   buildMcpServerEntry,
+  buildOpenAIToolSchemas,
   configureMcpClient,
+  installAgentRulesFile,
+  installLocalAiBundle,
+  loadCanonicalAgentRules,
   resolveClientConfigPath,
+  resolveClientRulesPaths,
 } from "../src/mcp-config.mjs";
 
 test("validateSerial rejects command injection and flags", () => {
@@ -250,4 +258,200 @@ test("checkTcpPort distinguishes live NDJSON android-daemon from stale adb forwa
   const livePort = liveServer.address().port;
   assert.equal(await checkTcpPort("127.0.0.1", livePort, 300), true);
   liveServer.close();
+});
+
+test("supports Gemini CLI, Antigravity, LM Studio, Ollama/OpenWebUI/Local AI config paths and local HTTP manifest", () => {
+  assert.equal(
+    resolveClientConfigPath("gemini", { platform: "darwin", homeDir: "/Users/dev" }),
+    "/Users/dev/.gemini/settings.json"
+  );
+  assert.equal(
+    resolveClientConfigPath("gemini-cli", { platform: "linux", homeDir: "/home/dev" }),
+    "/home/dev/.gemini/settings.json"
+  );
+  assert.equal(
+    resolveClientConfigPath("antigravity", { platform: "darwin", homeDir: "/Users/dev" }),
+    "/Users/dev/.gemini/antigravity/mcp_config.json"
+  );
+  assert.equal(
+    resolveClientConfigPath("lm-studio", { platform: "darwin", homeDir: "/Users/dev" }),
+    "/Users/dev/.lmstudio/mcp.json"
+  );
+  assert.equal(
+    resolveClientConfigPath("local", { platform: "darwin", homeDir: "/Users/dev" }),
+    "/Users/dev/.droidpath/local-ai/mcp-http.json"
+  );
+  assert.equal(
+    resolveClientConfigPath("ollama", { platform: "darwin", homeDir: "/Users/dev" }),
+    "/Users/dev/.droidpath/local-ai/mcp-http.json"
+  );
+
+  assert.deepEqual(expandClients("all"), [
+    "cursor",
+    "claude",
+    "claude-code",
+    "gemini",
+    "antigravity",
+    "lm-studio",
+    "local",
+  ]);
+
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-local-ai-"));
+  const localCfgPath = path.join(tmpDir, "mcp-http.json");
+  const entry = buildMcpServerEntry({ mode: "stdio" });
+  const localRes = configureMcpClient({
+    client: "local",
+    configPath: localCfgPath,
+    entry,
+    port: 8766,
+  });
+  assert.equal(localRes.changed, true);
+  const parsed = JSON.parse(readFileSync(localCfgPath, "utf8"));
+  assert.equal(parsed.mcpServers.droidpath.url, "http://127.0.0.1:8766/sse");
+  assert.equal(parsed.localAi.loopbackOnly, true);
+  assert.equal(parsed.localAi.messageUrl, "http://127.0.0.1:8766/message");
+
+  // Local AI bundle exports compact system prompt + OpenAI tool schemas
+  const bundle = installLocalAiBundle({ outDir: tmpDir, port: 8766, dryRun: false });
+  assert.equal(bundle.length, 2);
+  assert.equal(bundle[0].changed, true);
+  const toolsJson = JSON.parse(readFileSync(path.join(tmpDir, "openai-tools.json"), "utf8"));
+  assert.equal(toolsJson.server.loopbackOnly, true);
+  const navFn = toolsJson.tools.find((t) => t.function.name === "android_navigate_to_node");
+  const expFn = toolsJson.tools.find((t) => t.function.name === "android_explore_and_click");
+  assert.ok(navFn?.function.parameters.properties.auto_explore);
+  assert.ok(expFn?.function.parameters.properties.target);
+  assert.ok(buildOpenAIToolSchemas().length >= 9);
+  assert.match(buildCompactLocalSystemPrompt(), /android_navigate_to_node/);
+  assert.match(buildCompactLocalSystemPrompt(), /requires_confirmation/);
+  assert.match(buildCompactLocalSystemPrompt(), /secure_screen_active/);
+
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("installAgentRulesFile merges idempotent managed blocks without clobbering user content", () => {
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-rules-"));
+  const rulesFile = path.join(tmpDir, "GEMINI.md");
+
+  // 1. Existing user content before and after must stay intact
+  writeFileSync(rulesFile, "# My Custom Project Rules\nKeep TypeScript strict.\n", "utf8");
+
+  // Dry-run does not modify file
+  const dry = installAgentRulesFile({ filePath: rulesFile, content: "Rule V1", dryRun: true });
+  assert.equal(dry.changed, true);
+  assert.equal(dry.action, "appended");
+  assert.equal(readFileSync(rulesFile, "utf8").includes(RULES_START_MARKER), false);
+
+  // Append managed block
+  const r1 = installAgentRulesFile({ filePath: rulesFile, content: "Rule V1", dryRun: false });
+  assert.equal(r1.changed, true);
+  assert.equal(r1.action, "appended");
+  const afterAppend = readFileSync(rulesFile, "utf8");
+  assert.match(afterAppend, /# My Custom Project Rules/);
+  assert.match(afterAppend, /Keep TypeScript strict\./);
+  assert.ok(afterAppend.includes(`${RULES_START_MARKER}\nRule V1\n${RULES_END_MARKER}`));
+
+  // Append trailing user content below block, then update managed block -> trailing text preserved!
+  writeFileSync(rulesFile, `${afterAppend}\n## User Footer\nDo not delete me.\n`, "utf8");
+  const r2 = installAgentRulesFile({ filePath: rulesFile, content: "Rule V2", dryRun: false });
+  assert.equal(r2.changed, true);
+  assert.equal(r2.action, "updated");
+  const afterUpdate = readFileSync(rulesFile, "utf8");
+  assert.match(afterUpdate, /# My Custom Project Rules/);
+  assert.match(afterUpdate, /## User Footer\nDo not delete me\./);
+  assert.ok(afterUpdate.includes("Rule V2"));
+  assert.ok(!afterUpdate.includes("Rule V1"));
+
+  // Re-running with same content is a pure no-op
+  const r3 = installAgentRulesFile({ filePath: rulesFile, content: "Rule V2", dryRun: false });
+  assert.equal(r3.changed, false);
+  assert.equal(r3.action, "unchanged");
+
+  // Malformed markers must refuse to overwrite
+  const badFile = path.join(tmpDir, "BROKEN.md");
+  writeFileSync(badFile, `Header\n${RULES_START_MARKER}\nUnclosed block\n`, "utf8");
+  assert.throws(
+    () => installAgentRulesFile({ filePath: badFile, content: "Rule V3" }),
+    /Malformed DroidPath rules markers/
+  );
+
+  // Verify bundled canonical rules asset loads cleanly
+  const canonical = loadCanonicalAgentRules();
+  assert.match(canonical, /android_navigate_to_node/);
+  assert.match(canonical, /android_explore_and_click/);
+  assert.match(canonical, /android_screenshot/);
+  assert.match(canonical, /requires_confirmation/);
+  assert.match(canonical, /secure_screen_active/);
+
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("CLI rules command, --format exports, and init --no-rules flag work cleanly", async () => {
+  const parsedNoRules = parseCliArgs(["init", "--client", "gemini,antigravity", "--no-rules", "--dry-run"]);
+  assert.equal(parsedNoRules.flags.noRules, true);
+  assert.equal(parsedNoRules.flags.client, "gemini,antigravity");
+
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-cli-rules-"));
+  const lines = [];
+  const io = { out: (s) => lines.push(s), err: (s) => lines.push(s) };
+
+  // 1. `droidpath rules --dir <tmpDir> --client all --json`
+  assert.equal(await runCli(["rules", "--dir", tmpDir, "--client", "all", "--json"], io), 0);
+  const rulesReport = JSON.parse(lines.join("\n"));
+  assert.ok(rulesReport.rules.length >= 6);
+  assert.equal(existsSync(path.join(tmpDir, ".cursorrules")), true);
+  assert.equal(existsSync(path.join(tmpDir, "CLAUDE.md")), true);
+  assert.equal(existsSync(path.join(tmpDir, "GEMINI.md")), true);
+  assert.equal(existsSync(path.join(tmpDir, ".agent", "rules", "droidpath.md")), true);
+  assert.equal(existsSync(path.join(tmpDir, ".droidpath-local-ai", "system-prompt.md")), true);
+  assert.equal(existsSync(path.join(tmpDir, ".droidpath-local-ai", "openai-tools.json")), true);
+
+  // 2. `droidpath rules --format openai` prints valid OpenAI function schemas
+  lines.length = 0;
+  assert.equal(await runCli(["rules", "--format", "openai"], io), 0);
+  const schemas = JSON.parse(lines.join("\n"));
+  assert.ok(Array.isArray(schemas));
+  assert.ok(schemas.some((t) => t.function.name === "android_explore_and_click"));
+
+  // 3. `droidpath rules --format prompt`, `local`, and `system-prompt` print compact local system prompt
+  for (const fmt of ["prompt", "local", "system-prompt"]) {
+    lines.length = 0;
+    assert.equal(await runCli(["rules", "--format", fmt], io), 0);
+    const out = lines.join("\n");
+    assert.match(out, /android_navigate_to_node/);
+    assert.match(out, /android_explore_and_click/);
+  }
+
+  // 4. `droidpath init --dry-run --no-rules --json` configures MCP entries with zero rules
+  lines.length = 0;
+  assert.equal(
+    await runCli(["init", "--client", "cursor,gemini,antigravity,local", "--no-rules", "--dry-run", "--json"], io),
+    0
+  );
+  const initNoRules = JSON.parse(lines.join("\n"));
+  assert.equal(initNoRules.configured.length, 4);
+  assert.equal(initNoRules.rules.length, 0);
+
+  // 5. `droidpath init --dry-run --dir <tmpDir2> --json` installs rules by default
+  const tmpDir2 = mkdtempSync(path.join(os.tmpdir(), "droidpath-cli-init-default-"));
+  lines.length = 0;
+  assert.equal(
+    await runCli(["init", "--client", "cursor,gemini,antigravity,local", "--dir", tmpDir2, "--dry-run", "--json"], io),
+    0
+  );
+  const initWithRules = JSON.parse(lines.join("\n"));
+  assert.equal(initWithRules.configured.length, 4);
+  assert.ok(initWithRules.rules.length >= 5, "init must install rules by default");
+
+  // Verify resolveClientRulesPaths global mode
+  const globalGemini = resolveClientRulesPaths("gemini", {
+    projectDir: tmpDir,
+    homeDir: "/Users/dev",
+    globalInstall: true,
+    platform: "darwin",
+  });
+  assert.ok(globalGemini.includes("/Users/dev/.gemini/GEMINI.md"));
+
+  rmSync(tmpDir, { recursive: true, force: true });
+  rmSync(tmpDir2, { recursive: true, force: true });
 });

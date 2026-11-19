@@ -21,14 +21,15 @@ Now powered by a **zero-JVM cross-platform Rust core (`droidpath-core`)**, a **~
 
 ### Option A: `npx droidpath` (Windows · Linux · macOS)
 
-Bundles `android-daemon.jar` directly inside the CLI package — auto-pushes via SHA-256 cached `adb push`, configures `adb forward`, starts `app_process`, and auto-configures Cursor / Claude Desktop MCP:
+Bundles `android-daemon.jar` directly inside the CLI package — auto-pushes via SHA-256 cached `adb push`, configures `adb forward`, starts `app_process`, and auto-configures Cursor, Claude Desktop/Code, Gemini CLI, Antigravity, LM Studio & local AI runtimes (plus idempotent agent rules by default, or skip with `--no-rules`):
 
 ```bash
-# 1-click daemon deploy + Cursor/Claude MCP auto-configuration
+# 1-click daemon deploy + Cursor/Claude/Gemini/Antigravity MCP auto-configuration & agent rules
 npx droidpath start --configure
 
 # Or run individual commands:
-npx droidpath init --client all       # Auto-configure Cursor & Claude Desktop MCP JSON
+npx droidpath init --client all       # Auto-configure Cursor, Claude, Gemini CLI, Antigravity & local AI + agent rules
+npx droidpath rules --format local    # Install .cursorrules/CLAUDE.md/GEMINI.md or export local LLM system prompt
 npx droidpath daemon deploy           # SHA-256 cached adb push + adb forward + app_process
 npx droidpath mcp --stdio             # Launch native Rust MCP server (auto-injects daemon)
 npx droidpath doctor                  # Full environment & device health check
@@ -79,15 +80,17 @@ flowchart LR
 
 1. **Layer 1 — Headless Kotlin Shadow DOM Daemon (`android-daemon/`):**
    - Compiles into a standalone **650 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required.
+   - Enforces on-device **Privacy by Design**: binds its TCP socket strictly to `127.0.0.1` loopback (`adb forward`) and masks `isPassword` / sensitive editable fields to `"***"` before streaming over TCP `:27189`.
    - Streams full snapshots, compact NDJSON incremental diffs, foreground `TYPE_APPLICATION` window priority over `com.android.systemui` notifications, and `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` events on `FLAG_SECURE` or biometric prompts over TCP (`:27189`).
    - Deployed idempotently via SHA-256 verification and protected by automatic self-healing recovery.
 
 2. **Layer 2 — Cross-Platform Rust Core (`crates/droidpath-core`):**
-   - Bit-exact FNV-1a 64-bit `ScreenLayoutHasher` stripping volatile clocks, dates, e-commerce tokens (`<PRICE>`, `<ETA>`, `<WEIGHT>`), unanchored decorative banner `ImageView`s, and `com.android.systemui` notification overlays.
-   - `SpatialGraphEngine` builds a directed multigraph with automatic Jaccard (`>= 0.90`) compaction, hazardous edge classification (`HazardousActionClassifier`), acyclic spanning DAG rebuild, and **100% bidirectional `shadow_graph.json` compatibility** with Swift `AndOnMac`.
+   - Bit-exact FNV-1a 64-bit `ScreenLayoutHasher` stripping volatile clocks, dates, e-commerce tokens (`<PRICE>`, `<ETA>`, `<WEIGHT>`), Luhn-validated card numbers (`<CARD>`), contextual 2FA/OTP codes (`<OTP>`), unanchored decorative banner `ImageView`s, and `com.android.systemui` notification overlays.
+   - `SpatialGraphEngine` builds a directed multigraph with automatic Jaccard (`>= 0.90`) compaction, hazardous edge classification (`HazardousActionClassifier`), `consecutiveFailures` edge decay and self-pruning, acyclic spanning DAG rebuild, and **100% bidirectional `shadow_graph.json` compatibility** with Swift `AndOnMac`.
 
 3. **Layer 3 — Persistent A\* Router, MCP CLI (`crates/droidpath-mcp`) & Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
-   - `AStarPathfinder` + `MacroExecutionEngine` with forward-skip recovery (`1 -> 3/4`), off-path scroll replan, universal popup dismissal (`UniversalDismissDetector`), reflexive heads-up notification swipe-up, Human-in-the-Loop confirmation (`requires_confirmation` / `confirmed: true`) before irreversible payment/destructive steps, and `FLAG_SECURE` biometric handoff (60s default wait).
+   - `AStarPathfinder` + `MacroExecutionEngine` with cold-start fallback (`android_explore_and_click` / `auto_explore: true`), forward-skip recovery (`1 -> 3/4`), `Back-to-Root` task-stack drift unwinding, `Smart Scroll-to-Selector`, off-path scroll replan, universal popup dismissal (`UniversalDismissDetector`), reflexive heads-up notification swipe-up, Human-in-the-Loop confirmation (`requires_confirmation` / `confirmed: true`) before irreversible payment/destructive steps, and `FLAG_SECURE` biometric handoff (60s default wait).
+   - **LLM Onboarding Rules:** Ships `.cursorrules`, `CLAUDE.md`, `GEMINI.md`, and `docs/system_prompt.md` (installed idempotently via `npx droidpath init` / `npx droidpath rules` or skipped via `--no-rules`) so cloud and local models follow the Shadow-DOM-first protocol without spamming `android_screenshot`.
    - **Tauri v2 Desktop HUD** combines an embedded `scrcpy-server` H.264 -> WebCodecs `<canvas>` mirror (with automatic `screencap` fallback) and an integrated 3-color **Agentic HUD** (**Red** autonomous execution, **Yellow** awaiting HITL confirmation with interactive *Approve / Cancel* buttons, **Blue** awaiting biometrics / `FLAG_SECURE`) + live SVG Spatial Graph Explorer in a single window — working cleanly on **Windows, macOS, and Linux Wayland/X11** while preserving passive graph learning by clicking.
 
 ---
@@ -151,7 +154,8 @@ npm --prefix packages/droidpath-cli run sync-daemon
 
 | Tool | Description |
 | :--- | :--- |
-| `android_navigate_to_node` | Runs Layer 3 A\* routing to reach a target text, `resource-id`, package, or canonical layout hash (`0x...`) across screens (supports `confirmed: true` for HITL) |
+| `android_navigate_to_node` | Runs Layer 3 A\* routing to reach a target text, `resource-id`, package, or canonical layout hash (`0x...`) across screens (supports `auto_explore: true` cold-start fallback & `confirmed: true` for HITL) |
+| `android_explore_and_click` | Dynamic Cold-Start Auto-Explore: scores live Shadow DOM nodes, scrolls scrollable lists (reversing at bottom), clicks, and records new edges into the Spatial Graph on the fly (or returns top-20 PII-scrubbed `candidates`) |
 | `android_get_ui_tree` | Reads live interactive UI elements from the Kotlin Shadow DOM stream (with `uiautomator` XML fallback) |
 | `android_graph_stats` | Inspects persisted graph vertex/edge counts, active canonical hash, daemon state, and storage path |
 | `android_list_devices` | Lists connected USB and Wireless ADB Android devices |

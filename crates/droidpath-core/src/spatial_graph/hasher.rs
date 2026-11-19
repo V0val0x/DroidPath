@@ -49,6 +49,8 @@ struct HasherRegexes {
     collapse_eta: Regex,
     weight_multi: Regex,
     weight_single: Regex,
+    otp_after_marker: Regex,
+    otp_before_marker: Regex,
 }
 
 fn regexes() -> &'static HasherRegexes {
@@ -110,6 +112,14 @@ fn regexes() -> &'static HasherRegexes {
         // Case-sensitive for single-letter units so "5G" cellular indicators are never tokenized as weights.
         weight_single: Regex::new(r"#(?:[.,]#)?\s*(?:g|l|г\.?|л\.?)(?!\p{L})")
             .expect("weight_single regex"),
+        otp_after_marker: Regex::new(
+            r"(?i)((?<![\p{L}\d])(?:code|otp|pin|verification|2fa|код|подтверждени[ея]|смс|sms)(?![\p{L}\d])[^\r\n.!?;]{0,32}?(?:\r?\n[ \t]*)?)(?<!\d[./-])(?<!\d)(?:\d{4,8}|\d{3}[ -]\d{3})(?!\d)(?![./-]\d)",
+        )
+        .expect("otp_after_marker regex"),
+        otp_before_marker: Regex::new(
+            r"(?i)(?<!\d[./-])(?<!\d)(?:\d{4,8}|\d{3}[ -]\d{3})(?!\d)(?![./-]\d)((?:\r?\n[ \t]*)?[^\r\n.!?;]{0,32}?(?<![\p{L}\d])(?:code|otp|pin|verification|2fa|код|подтверждени[ея]|смс|sms)(?![\p{L}\d]))",
+        )
+        .expect("otp_before_marker regex"),
     })
 }
 
@@ -269,7 +279,8 @@ impl ScreenLayoutHasher {
             token_set.insert(token);
 
             if !raw_label.is_empty() && (is_interactive || !node.resource_id.is_empty()) {
-                let compact_label: String = raw_label.chars().take(40).collect();
+                let safe_label = Self::redact_pii(raw_label);
+                let compact_label: String = safe_label.chars().take(40).collect();
                 if seen_labels.insert(compact_label.clone()) {
                     if temporal_kind.is_some() {
                         if temporal_labels.len() < 8 {
@@ -505,7 +516,7 @@ impl ScreenLayoutHasher {
         if label.is_empty()
             || matches!(
                 label,
-                "<TEXT>" | "<CLOCK>" | "<DATE>" | "<PRICE>" | "<ETA>" | "<WEIGHT>"
+                "<TEXT>" | "<CLOCK>" | "<DATE>" | "<PRICE>" | "<ETA>" | "<WEIGHT>" | "<CARD>" | "<OTP>"
             )
         {
             return token.to_string();
@@ -517,18 +528,181 @@ impl ScreenLayoutHasher {
         format!("{class_name}|{resource_id}|{normalized}")
     }
 
+    fn passes_luhn(digits: &[u8]) -> bool {
+        let mut sum: u32 = 0;
+        let mut double = false;
+        for &d in digits.iter().rev() {
+            let mut val = u32::from(d);
+            if double {
+                val *= 2;
+                if val > 9 {
+                    val -= 9;
+                }
+            }
+            sum += val;
+            double = !double;
+        }
+        sum.is_multiple_of(10)
+    }
+
+    fn is_card_separator(c: char) -> bool {
+        c == ' ' || c == '-' || c == '\u{00A0}'
+    }
+
+    fn is_date_or_time_continuation(chars: &[char], idx: usize) -> bool {
+        idx + 1 < chars.len()
+            && (chars[idx] == '/' || chars[idx] == ':')
+            && chars[idx + 1].is_ascii_digit()
+    }
+
+    fn redact_card_numbers(input: &str) -> String {
+        let chars: Vec<char> = input.chars().collect();
+        let n = chars.len();
+        let mut out = String::with_capacity(input.len());
+        let mut i = 0usize;
+
+        while i < n {
+            let ch = chars[i];
+            if ch.is_ascii_digit() && (i == 0 || !chars[i - 1].is_ascii_digit()) {
+                let mut first_end = i;
+                while first_end < n && chars[first_end].is_ascii_digit() {
+                    first_end += 1;
+                }
+                let first_len = first_end - i;
+                let preceded_by_date_time = i >= 2
+                    && (chars[i - 1] == '/' || chars[i - 1] == ':')
+                    && chars[i - 2].is_ascii_digit();
+
+                if first_len > 19
+                    || preceded_by_date_time
+                    || Self::is_date_or_time_continuation(&chars, first_end)
+                {
+                    for &c in &chars[i..first_end] {
+                        out.push(c);
+                    }
+                    i = first_end;
+                    continue;
+                }
+
+                let mut digits: Vec<u8> = Vec::with_capacity(20);
+                for &c in &chars[i..first_end] {
+                    digits.push((c as u8) - b'0');
+                }
+
+                let mut best_end: Option<usize> = None;
+                if (13..=19).contains(&digits.len())
+                    && digits.iter().any(|&d| d != digits[0])
+                    && Self::passes_luhn(&digits)
+                {
+                    best_end = Some(first_end);
+                }
+
+                if first_len >= 4 {
+                    let mut cursor = first_end;
+                    let mut sep_is_hyphen: Option<bool> = None;
+                    while cursor < n && digits.len() < 19 {
+                        let mut sep_end = cursor;
+                        while sep_end < n
+                            && sep_end - cursor < 2
+                            && Self::is_card_separator(chars[sep_end])
+                        {
+                            sep_end += 1;
+                        }
+                        if sep_end == cursor || sep_end >= n || !chars[sep_end].is_ascii_digit() {
+                            break;
+                        }
+                        let cur_has_hyphen = chars[cursor..sep_end].contains(&'-');
+                        let cur_has_space = chars[cursor..sep_end]
+                            .iter()
+                            .any(|&c| c == ' ' || c == '\u{00A0}');
+                        if cur_has_hyphen && cur_has_space {
+                            break;
+                        }
+                        if let Some(expected_hyphen) = sep_is_hyphen {
+                            if cur_has_hyphen != expected_hyphen {
+                                break;
+                            }
+                        } else {
+                            sep_is_hyphen = Some(cur_has_hyphen);
+                        }
+
+                        let mut group_end = sep_end;
+                        while group_end < n && chars[group_end].is_ascii_digit() {
+                            group_end += 1;
+                        }
+                        if Self::is_date_or_time_continuation(&chars, group_end) {
+                            break;
+                        }
+                        let group_len = group_end - sep_end;
+                        if digits.len() + group_len > 19 {
+                            break;
+                        }
+                        for &c in &chars[sep_end..group_end] {
+                            digits.push((c as u8) - b'0');
+                        }
+                        cursor = group_end;
+
+                        if (13..=19).contains(&digits.len())
+                            && digits.iter().any(|&d| d != digits[0])
+                            && Self::passes_luhn(&digits)
+                        {
+                            best_end = Some(cursor);
+                        }
+                    }
+                }
+
+                if let Some(end) = best_end {
+                    out.push_str("<CARD>");
+                    i = end;
+                } else {
+                    for &c in &chars[i..first_end] {
+                        out.push(c);
+                    }
+                    i = first_end;
+                }
+            } else {
+                out.push(ch);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Scrubs Luhn-valid payment card PANs (`<CARD>`) and context-anchored OTP/2FA codes (`<OTP>`)
+    /// while leaving ordinary numbers (`2026`, `1080`, timestamps, repeated zeros) untouched.
+    /// Bit-exact compatible with Swift `ScreenLayoutHasher.redactPII(_:)`.
+    pub fn redact_pii(raw: &str) -> String {
+        if !raw.bytes().any(|b| b.is_ascii_digit()) {
+            return raw.to_string();
+        }
+        let mut result = Self::redact_card_numbers(raw);
+        if result.bytes().any(|b| b.is_ascii_digit()) {
+            let re = regexes();
+            result = re
+                .otp_after_marker
+                .replace_all(&result, "${1}<OTP>")
+                .into_owned();
+            result = re
+                .otp_before_marker
+                .replace_all(&result, "<OTP>${1}")
+                .into_owned();
+        }
+        result
+    }
+
     pub fn normalize_label(raw: &str) -> String {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return String::new();
         }
+        let redacted = Self::redact_pii(trimmed);
 
-        let mut collapsed = String::with_capacity(trimmed.len().min(256));
+        let mut collapsed = String::with_capacity(redacted.len().min(256));
         let mut scalar_count = 0usize;
         let mut in_digits = false;
         let mut last_was_space = false;
 
-        for ch in trimmed.chars() {
+        for ch in redacted.chars() {
             if ch.is_ascii_digit() {
                 if !in_digits {
                     collapsed.push('#');

@@ -279,6 +279,35 @@ impl AttributedUIAction {
         }
         self.kind.as_str().to_string()
     }
+
+    /// Returns a PII-scrubbed copy safe to store in `SpatialGraphEngine` and serialize into `shadow_graph.json`.
+    pub fn redacted_for_storage(&self) -> Self {
+        use super::hasher::ScreenLayoutHasher;
+        Self {
+            kind: self.kind,
+            target_description: ScreenLayoutHasher::redact_pii(&self.target_description),
+            x: self.x,
+            y: self.y,
+            end_x: self.end_x,
+            end_y: self.end_y,
+            duration_ms: self.duration_ms,
+            text_input: self
+                .text_input
+                .as_deref()
+                .map(ScreenLayoutHasher::redact_pii),
+            press_enter: self.press_enter,
+            selector_resource_id: self.selector_resource_id.clone(),
+            selector_text: self
+                .selector_text
+                .as_deref()
+                .map(ScreenLayoutHasher::redact_pii),
+            selector_content_desc: self
+                .selector_content_desc
+                .as_deref()
+                .map(ScreenLayoutHasher::redact_pii),
+            timestamp: self.timestamp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +347,8 @@ pub struct ScreenTransitionEdge {
     pub is_hazardous: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hazard_reason: Option<String>,
+    #[serde(default)]
+    pub consecutive_failures: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

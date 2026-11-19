@@ -377,6 +377,7 @@ async fn navigate_to_node(
             max_s,
             timeout_ms,
             is_confirmed,
+            false,
             60.0,
             None,
         )
@@ -454,6 +455,7 @@ async fn resolve_hitl_confirmation(
             nav.max_steps,
             nav.step_timeout_ms,
             true,
+            false,
             60.0,
             None,
         )
@@ -1011,6 +1013,7 @@ mod tests {
                 last_traversed_at: now,
                 is_hazardous: true,
                 hazard_reason: Some("payment".to_string()),
+                consecutive_failures: 0,
             }],
             spanning_children: BTreeMap::new(),
         };
