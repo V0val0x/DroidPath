@@ -1,9 +1,9 @@
 # DroidPath
 
-**Персистентный A\* символьный UI-роутер, headless Kotlin Shadow DOM демон и автономный MCP-мост для Android**
+**Кроссплатформенный персистентный A\* символьный UI-роутер, headless Kotlin Shadow DOM демон, нативный Rust MCP CLI и Tauri v2 Agentic HUD для Android (Windows · Linux · macOS)**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
-[![Platform: macOS 14+ / Android](https://img.shields.io/badge/Platform-macOS%2014%2B%20%7C%20Android-blue.svg)](https://github.com/V0val0x/DroidPath)
+[![Platforms: Windows · Linux · macOS · Android](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue.svg)](https://github.com/V0val0x/DroidPath)
 [![GitHub Release](https://img.shields.io/github/v/release/V0val0x/DroidPath?color=brightgreen)](https://github.com/V0val0x/DroidPath/releases)
 [![CI](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml/badge.svg)](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml)
 
@@ -13,50 +13,85 @@
 
 **DroidPath** избавляет ИИ-агентов от медленных и дорогих циклов *«скриншот → рассуждение VLM → клик»* при автоматизации Android. Вместо анализа скриншотов на каждом шаге DroidPath стримит живой **Shadow DOM** напрямую из Accessibility/Window API, компилирует переходы между экранами в **персистентный Spatial Graph** и проходит многошаговые маршруты детерминированным **алгоритмом A\*** за миллисекунды — с **нулём промежуточных вызовов LLM**.
 
+Версия 2.0 перенесена на **кроссплатформенный Rust (`droidpath-core`)** без JVM, компактный нативный **MCP CLI (`droidpath-mcp`, ~4 МБ)**, **Tauri v2 Desktop HUD** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **установку в 1 клик** (`npx droidpath`, `install.sh`, `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
+
 ---
 
-## Трёхуровневая архитектура
+## Установка в 1 клик (Zero-Friction Onboarding)
+
+### Вариант A: `npx droidpath` (Windows · Linux · macOS)
+
+Содержит встроенный `android-daemon.jar` — одной командой пушит демон с SHA-256 кешированием (`adb push`), пробрасывает порт (`adb forward`), запускает `app_process` и автоматически прописывает MCP в Cursor и Claude Desktop:
+
+```bash
+# Старт в 1 клик: деплой демона + авто-настройка MCP (Cursor / Claude Desktop)
+npx droidpath start --configure
+
+# Отдельные команды:
+npx droidpath init --client all       # Авто-настройка Cursor и Claude Desktop MCP JSON
+npx droidpath daemon deploy           # SHA-256 adb push + adb forward + app_process
+npx droidpath mcp --stdio             # Запуск нативного Rust MCP-сервера с авто-деплоем демона
+npx droidpath doctor                  # Полная диагностика ADB, устройства, демона и графа
+```
+
+### Вариант B: Установщики без Node.js (`install.sh` / `install.ps1`)
+
+**macOS и Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --deploy --configure-mcp all
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
+# Или локально с авто-деплоем и настройкой MCP:
+.\scripts\install.ps1 -Deploy -ConfigureMcp all
+```
+
+---
+
+## Трёхуровневая кроссплатформенная архитектура
 
 ```mermaid
 flowchart LR
-    Agent["ИИ-агент (Claude / Cursor / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp / DroidPathBridge"]
+    Agent["ИИ-агент (Claude / Cursor / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~4 МБ)\n+ npx droidpath CLI"]
 
-    subgraph Host["macOS Хост (Swift 5.9+ · AndroidShadowGraphKit)"]
+    subgraph Host["Windows · Linux · macOS Хост (Rust droidpath-core + Tauri v2 HUD)"]
         CLI <-->|"Поиск путей и пассивное обучение"| Bridge["ShadowGraphBridge"]
-        Bridge --> DOM["ShadowDOMState + ShadowTreeIndex"]
-        Bridge --> Graph["SpatialGraphEngine\nScreenLayoutHasher · Jaccard ≥ 0.90\n~/.droidpath/shadow_graph.json"]
-        Bridge --> AStar["AStarPathfinder + MacroExecutionEngine"]
+        HUD["Tauri v2 Desktop HUD\nscrcpy H.264 -> WebCodecs\nHITL-кнопки и пассивное обучение"] <--> Bridge
+        Bridge --> DOM["ShadowDomState + ShadowTreeIndex"]
+        Bridge --> Graph["SpatialGraphEngine\nScreenLayoutHasher · Jaccard ≥ 0.90\n~/.droidpath/shadow_graph.json\n(100% совместимость с AndOnMac)"]
+        Bridge --> AStar["AStarPathfinder + MacroExecutionEngine\nAuto-Recovery · HITL · FLAG_SECURE"]
         Bridge -->|"Self-Healing Recovery"| Recovery["SHA-256 деплой + перезапуск app_process"]
     end
 
     subgraph Android["Android-устройство (Без установки APK)"]
         Daemon["android-daemon.jar (Kotlin single-DEX)\napp_process :27189 · NDJSON дифф-поток"]
+        Scrcpy["scrcpy-server (H.264 + Control)"]
         Sys["UiAutomation / Accessibility / WindowManager"]
     end
 
     Daemon <-->|"adb forward tcp:27189"| DOM
+    Scrcpy <-->|"Loopback WS -> WebCodecs"| HUD
     AStar -->|"adb shell input tap/swipe"| Sys
     Daemon --- Sys
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM демон (`android-daemon/`):**
-   - Собирается в автономный **single-DEX JAR (631 КБ)** (`android-daemon.jar`), запускается напрямую через `app_process` — не требует установки APK.
-   - Стримит полные снимки и компактные NDJSON-диффы по TCP (`:27189`) с дебаунсингом событий, контролем глубины дерева и heartbeat/watchdog.
-   - Деплоится идемпотентно по SHA-256 (`DroidPathManager` / `deploy.sh`) и автоматически перезапускается механизмом Self-Healing при обрыве процесса.
+   - Автономный **single-DEX JAR (~635 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK.
+   - Стримит полные снимки, инкрементальные NDJSON-диффы и события `FLAG_SECURE` / биометрии по TCP (`:27189`).
 
-2. **Layer 2 — Live Shadow DOM и персистентный Spatial Graph (`AndroidShadowGraphKit`):**
-   - `ScreenLayoutHasher` очищает динамические часы (`12:34`) и даты, чтобы возврат на главный экран или в Настройки давал стабильный хеш состояния.
-   - `SpatialGraphEngine` строит ориентированный мультиграф экранов (`vertices`) и жестов (`edges`), схлопывает дубликаты по коэффициенту Жаккара (`>= 0.90`) и сохраняет граф в `~/.droidpath/shadow_graph.json`.
+2. **Layer 2 — Кроссплатформенное ядро на Rust (`crates/droidpath-core`):**
+   - Побитово совместимый FNV-1a 64-bit `ScreenLayoutHasher`: очищает часы, даты, цены, ETA, веса, декоративные `ImageView` баннеры и системные push-баннеры `com.android.systemui`.
+   - `SpatialGraphEngine` строит мультиграф с компактацией по Жаккару (`>= 0.90`), ациклическим остовным DAG и **100% двусторонней совместимостью `shadow_graph.json`** с Swift `AndOnMac`.
 
-3. **Layer 3 — Персистентный A\* роутер и автономный MCP-мост (`DroidPathBridge` + `droidpath-mcp`):**
-   - `AStarPathfinder` + `BinaryHeapPriorityQueue` находит кратчайший маршрут до целевого текста, `resource-id`, пакета или хеша экрана.
-   - `MacroExecutionEngine` отправляет жесты по ADB, проверяет подтверждение перехода через живой Shadow DOM на каждом шаге (включая ожидание остановки инерционного скролла `RecyclerView` после свайпа перед вычислением координат следующего шага) и выдаёт структурированный `PathDeviationError` при неожиданных диалогах или таймаутах.
+3. **Layer 3 — A\* роутер, MCP CLI (`crates/droidpath-mcp`) и Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
+   - `AStarPathfinder` + `MacroExecutionEngine` с forward-skip восстановлением, перепланированием после скролла, универсальным закрытием промо-попапов, смахиванием пуш-уведомлений, HITL-подтверждением опасных действий (оплата/удаление) и паузой на `FLAG_SECURE`.
+   - **Tauri v2 Desktop HUD** объединяет встроенное зеркало экрана (`scrcpy-server` H.264 -> WebCodecs `<canvas>` с автоматическим fallback на `screencap`) и Agentic HUD в одном окне — работает на **Windows, macOS и Linux Wayland/X11**, сохраняет пассивное обучение кликами и интерактивные HITL-кнопки *Approve / Cancel*.
 
 ---
 
 ## Замер на реальном устройстве (Pixel 10a · `android_navigate_to_node`)
-
-Задача: *«Открыть экран Night Light»* с рабочего стола:
 
 | Метрика | Классический VLM-цикл со скриншотами | **DroidPath A\* Router** |
 | :--- | :---: | :---: |
@@ -64,73 +99,38 @@ flowchart LR
 | **Полное время маршрута** | ~12 000–25 000 мс | **1 683 мс** (4 шага) |
 | **Обратная связь интерфейса** | Тяжёлые PNG (`screencap`) | Субмиллисекундные Shadow DOM кадры |
 
-| Исполнение A\* маршрута поверх 120Hz HUD |
+| Исполнение A\* маршрута поверх Agentic HUD |
 | :---: |
 | ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
 
-## Comparison with Alternatives
-
-Существующие решения используют stateless ADB-биндинги, что даёт 2–4 секунды задержки на каждое действие и заставляет LLM микроменеджить интерфейс. DroidPath (и [AndOnMac](https://github.com/V0val0x/AndOnMac)) использует персистентный направленный ациклический граф (DAG) и A*-маршрутизацию на macOS, снижая latency до `<1s` на клик и полностью снимая нагрузку с LLM при навигации по известным маршрутам.
-
-| Инструмент | Подход к автоматизации | Задержка на шаг | Нагрузка на LLM |
-| :--- | :--- | :---: | :--- |
-| **Mobile MCP / Maestro MCP / adbridge** | Stateless-обёртки над ADB / `uiautomator` | 2–4 с | LLM планирует каждый клик и свайп |
-| **Appium / CursorTouch** | WebDriver-сессии или циклы по скриншотам | 2–5 с | Частые запросы к модели и опрос DOM |
-| **DroidPath (+ AndOnMac)** | Персистентный DAG + A*-роутер + Shadow DOM демон | `<1s` / шаг | `0` промежуточных вызовов на известных маршрутах |
-
 ---
 
-## Быстрый старт
+## Сборка из исходников
 
-### 1. Сборка `droidpath-mcp` и `android-daemon.jar`
-
-Требования: macOS 14+, Swift 5.9+, `adb` (`brew install android-platform-tools`), JDK 17 (при пересборке `android-daemon.jar` из Kotlin).
+Требования: Rust (`stable`), `adb`, Node.js 18+ (для CLI и фронтенда Tauri), JDK 17 (только для пересборки `android-daemon.jar`).
 
 ```bash
 git clone https://github.com/V0val0x/DroidPath.git
 cd DroidPath
 
-# Сборка single-DEX Kotlin-демона
+# 1. Тесты Rust ядра и MCP-сервера
+cargo test -p droidpath-core -p droidpath-mcp
+
+# 2. Сборка нативного release-бинарника droidpath-mcp (~4 МБ, без JVM)
+cargo build --release -p droidpath-mcp
+
+# 3. Тесты Node.js 1-клик CLI
+npm --prefix packages/droidpath-cli test
+
+# 4. Запуск / сборка кроссплатформенного Tauri v2 Desktop HUD
+cd apps/droidpath-desktop
+npm install
+npm run tauri dev      # или: npm run tauri build
+
+# 5. (Опционально) Пересборка Kotlin single-DEX android-daemon.jar
 ./android-daemon/scripts/build-dex.sh
-
-# Запуск Swift и Kotlin тестов
-swift test
-./android-daemon/gradlew -p android-daemon test
-
-# Сборка release-бинарника CLI
-swift build -c release
+npm --prefix packages/droidpath-cli run sync-daemon
 ```
-
-Либо скачайте готовые `droidpath-mcp` и `android-daemon.jar` из [**GitHub Releases**](https://github.com/V0val0x/DroidPath/releases).
-
-### 2. Настройка для Claude Desktop / Cursor (`stdio`)
-
-```json
-{
-  "mcpServers": {
-    "droidpath": {
-      "command": "/path/to/droidpath-mcp",
-      "args": ["--stdio", "--daemon-jar", "/path/to/android-daemon.jar"]
-    }
-  }
-}
-```
-
-Либо запуск локального HTTP/SSE MCP-сервера (`127.0.0.1:8766`):
-
-```bash
-droidpath-mcp --http --port 8766 --daemon-jar ./android-daemon/build/dist/android-daemon.jar
-```
-
-### 3. Подключение через Swift Package Manager
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/V0val0x/DroidPath.git", from: "1.0.0")
-]
-```
-
-Добавьте `"AndroidShadowGraphKit"` или `"DroidPathBridge"` в зависимости вашего таргета.
 
 ---
 
@@ -138,28 +138,20 @@ dependencies: [
 
 | Инструмент | Описание |
 | :--- | :--- |
-| `android_navigate_to_node` | A\* маршрутизация к целевому тексту, `resource-id`, пакету или каноническому хешу (`0x...`) |
+| `android_navigate_to_node` | A\* маршрутизация к целевому тексту, `resource-id`, пакету или каноническому хешу (`0x...`), включая HITL `confirmed: true` |
 | `android_get_ui_tree` | Чтение дерева UI из быстрого Shadow DOM потока (с fallback на `uiautomator`) |
 | `android_graph_stats` | Статистика графа: число вершин/рёбер, текущий хеш, состояние демона, путь сохранения |
 | `android_list_devices` | Список подключённых Android-устройств по USB и Wi-Fi ADB |
 | `android_tap_element` | Клик по `(x, y)` или семантике (`text` / `resource_id` / `content_desc`) с записью в граф |
 | `android_swipe` | Свайп `(x1, y1) -> (x2, y2)` с обучением ребра графа |
-| `android_type_text` | Ввод текста в активное поле |
+| `android_type_text` | Ввод ASCII и Unicode текста в активное поле |
 | `android_keyevent` | Отправка системных кнопок (`HOME`, `BACK`, `ENTER`, `APP_SWITCH`, `POWER`) |
 
 ---
 
-## Модульная экосистема
+## Нативный компаньон для macOS
 
-Часть открытого стека автоматизации macOS ↔ Android вместе с [**AndOnMac**](https://github.com/V0val0x/AndOnMac):
-
-- [**AndOnMac**](https://github.com/V0val0x/AndOnMac) — нативное приложение зеркалирования Android до 120 FPS (VideoToolbox + Metal) с живым Agentic HUD
-- [**AndroidMCPKit**](https://github.com/V0val0x/AndroidMCPKit) — Visual-to-MCP студия макросов и 3-уровневый Vision OCR Self-Healing
-- [**MetalScrcpyKit**](https://github.com/V0val0x/MetalScrcpyKit) — zero-copy VideoToolbox H.264/HEVC декодер и `CAMetalLayer` рендерер
-- [**ADBConnectKit**](https://github.com/V0val0x/ADBConnectKit) — Swift ADB SDK без внешних зависимостей (USB, QR-сопряжение, Hotspot bypass)
-- [**VisionScreenRecallKit**](https://github.com/V0val0x/VisionScreenRecallKit) — локальный Apple Vision OCR и SQLite FTS5 память экрана
-
----
+- [**AndOnMac**](https://github.com/V0val0x/AndOnMac) — нативное macOS-приложение зеркалирования 120Hz (VideoToolbox + Metal) на Swift с полной 100% совместимостью формата `shadow_graph.json`.
 
 ## Лицензия
 

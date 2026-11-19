@@ -1,0 +1,15 @@
+[package]
+name = "droidpath-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone cross-platform DroidPath MCP CLI server (stdio + loopback HTTP/SSE) and zero-friction Android daemon deployer"
+
+[[bin]]
+name = "droidpath-mcp"
+path = "src/main.rs"
+
+[dependencies]
+droidpath-core = { path = "../droidpath-core" }
+serde_json.workspace = true
+tokio.workspace = true

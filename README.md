@@ -1,9 +1,9 @@
 # DroidPath
 
-**Persistent A\* Symbolic UI Router, Headless Kotlin Shadow DOM Daemon & Standalone MCP Bridge for Android**
+**Cross-Platform Persistent A\* Symbolic UI Router, Headless Kotlin Shadow DOM Daemon, Native Rust MCP CLI & Tauri v2 Agentic HUD for Android (Windows · Linux · macOS)**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
-[![Platform: macOS 14+ / Android](https://img.shields.io/badge/Platform-macOS%2014%2B%20%7C%20Android-blue.svg)](https://github.com/V0val0x/DroidPath)
+[![Platforms: Windows · Linux · macOS · Android](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue.svg)](https://github.com/V0val0x/DroidPath)
 [![GitHub Release](https://img.shields.io/github/v/release/V0val0x/DroidPath?color=brightgreen)](https://github.com/V0val0x/DroidPath/releases)
 [![CI](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml/badge.svg)](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml)
 
@@ -13,44 +13,82 @@
 
 **DroidPath** eliminates slow, token-heavy VLM screenshot-think-tap loops for Android automation. Instead of asking an LLM to inspect screenshots at every step, DroidPath streams a live **Shadow DOM** directly from Android Accessibility & Window APIs, compiles UI transitions into a **persistent Spatial Graph**, and navigates multi-screen workflows deterministically with **A\* pathfinding** in sub-second hops — with **zero intermediate LLM roundtrips**.
 
+Now powered by a **zero-JVM cross-platform Rust core (`droidpath-core`)**, a **~3–5 MB native MCP CLI (`droidpath-mcp`)**, a **Tauri v2 Desktop HUD** with built-in H.264 WebCodecs mirroring (Windows, Linux Wayland/X11, macOS), and **1-click Zero-Friction Onboarding** (`npx droidpath` / `install.sh` / `install.ps1`). Fully **100% `shadow_graph.json` compatible** with native macOS [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
+
 ---
 
-## Architecture (3 Layers)
+## 1-Click Zero-Friction Onboarding
+
+### Option A: `npx droidpath` (Windows · Linux · macOS)
+
+Bundles `android-daemon.jar` directly inside the CLI package — auto-pushes via SHA-256 cached `adb push`, configures `adb forward`, starts `app_process`, and auto-configures Cursor / Claude Desktop MCP:
+
+```bash
+# 1-click daemon deploy + Cursor/Claude MCP auto-configuration
+npx droidpath start --configure
+
+# Or run individual commands:
+npx droidpath init --client all       # Auto-configure Cursor & Claude Desktop MCP JSON
+npx droidpath daemon deploy           # SHA-256 cached adb push + adb forward + app_process
+npx droidpath mcp --stdio             # Launch native Rust MCP server (auto-injects daemon)
+npx droidpath doctor                  # Full environment & device health check
+```
+
+### Option B: Zero-Node.js Native Installers (`install.sh` / `install.ps1`)
+
+**macOS & Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --deploy --configure-mcp all
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
+# Or with local options:
+.\scripts\install.ps1 -Deploy -ConfigureMcp all
+```
+
+---
+
+## Architecture (3 Layers · Cross-Platform)
 
 ```mermaid
 flowchart LR
-    Agent["AI Agent (Claude / Cursor / MCP Client)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp / DroidPathBridge"]
+    Agent["AI Agent (Claude / Cursor / MCP Client)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~4MB)\n+ npx droidpath CLI"]
 
-    subgraph Host["macOS Host (Swift 5.9+ · AndroidShadowGraphKit)"]
+    subgraph Host["Windows · Linux · macOS Host (Rust droidpath-core + Tauri v2 HUD)"]
         CLI <-->|"Path Queries & Passive Learning"| Bridge["ShadowGraphBridge"]
-        Bridge --> DOM["ShadowDOMState + ShadowTreeIndex"]
-        Bridge --> Graph["SpatialGraphEngine\nScreenLayoutHasher · Jaccard ≥ 0.90\n~/.droidpath/shadow_graph.json"]
-        Bridge --> AStar["AStarPathfinder + MacroExecutionEngine"]
+        HUD["Tauri v2 Desktop HUD\nscrcpy H.264 -> WebCodecs\nHITL Buttons & Passive Clicks"] <--> Bridge
+        Bridge --> DOM["ShadowDomState + ShadowTreeIndex"]
+        Bridge --> Graph["SpatialGraphEngine\nScreenLayoutHasher · Jaccard ≥ 0.90\n~/.droidpath/shadow_graph.json\n(100% AndOnMac Swift-compatible)"]
+        Bridge --> AStar["AStarPathfinder + MacroExecutionEngine\nAuto-Recovery · HITL · FLAG_SECURE"]
         Bridge -->|"Self-Healing Recovery Hook"| Recovery["SHA-256 Deploy + app_process Restart"]
     end
 
     subgraph Android["Android Device (Zero-APK)"]
         Daemon["android-daemon.jar (Kotlin single-DEX)\napp_process :27189 · NDJSON Delta Stream"]
+        Scrcpy["scrcpy-server (H.264 + Control)"]
         Sys["UiAutomation / Accessibility / WindowManager"]
     end
 
     Daemon <-->|"adb forward tcp:27189"| DOM
+    Scrcpy <-->|"Loopback WS -> WebCodecs"| HUD
     AStar -->|"adb shell input tap/swipe"| Sys
     Daemon --- Sys
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM Daemon (`android-daemon/`):**
-   - Compiles into a standalone **631 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required.
-   - Streams full snapshots and compact NDJSON incremental diffs over TCP (`:27189`) with event debouncing, configurable tree depth, and heartbeat/watchdog protection.
-   - Deployed idempotently via SHA-256 verification (`DroidPathManager` / `deploy.sh`) and protected by automatic self-healing recovery if Android kills the process.
+   - Compiles into a standalone **~635 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required.
+   - Streams full snapshots, compact NDJSON incremental diffs, and `FLAG_SECURE` / biometric events over TCP (`:27189`).
+   - Deployed idempotently via SHA-256 verification and protected by automatic self-healing recovery.
 
-2. **Layer 2 — Live Shadow DOM & Persistent Spatial Graph (`AndroidShadowGraphKit`):**
-   - `ScreenLayoutHasher` strips volatile timestamps, clocks (`12:34`), and dates so returning to Home or Settings hashes deterministically.
-   - `SpatialGraphEngine` constructs a directed multigraph of screens (`vertices`) and UI gestures (`edges`), automatically compacts near-duplicate screens via Jaccard similarity (`>= 0.90`), and persists to `~/.droidpath/shadow_graph.json`.
+2. **Layer 2 — Cross-Platform Rust Core (`crates/droidpath-core`):**
+   - Bit-exact FNV-1a 64-bit `ScreenLayoutHasher` stripping volatile clocks, dates, prices, ETAs, weights, decorative banner `ImageView`s, and `com.android.systemui` notification overlays.
+   - `SpatialGraphEngine` builds a directed multigraph with automatic Jaccard (`>= 0.90`) compaction, acyclic spanning DAG rebuild, and **100% bidirectional `shadow_graph.json` compatibility** with Swift `AndOnMac`.
 
-3. **Layer 3 — Persistent A\* Symbolic Router & Standalone MCP Bridge (`DroidPathBridge` + `droidpath-mcp`):**
-   - `AStarPathfinder` + `BinaryHeapPriorityQueue` computes minimum-cost multi-hop routes to any target text, `resource-id`, package, or canonical layout hash.
-   - `MacroExecutionEngine` dispatches each tap/swipe over ADB, waits for exact or canonical Shadow DOM confirmation per hop (including post-swipe `RecyclerView` fling quiescence before resolving downstream bounds), and raises structured `PathDeviationError` diagnostics on unexpected popups or screen timeouts.
+3. **Layer 3 — Persistent A\* Router, MCP CLI (`crates/droidpath-mcp`) & Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
+   - `AStarPathfinder` + `MacroExecutionEngine` with forward-skip recovery, off-path scroll replan, universal popup dismissal, reflexive heads-up notification swipe-up, hazardous payment/delete HITL confirmation, and `FLAG_SECURE` biometric handoff.
+   - **Tauri v2 Desktop HUD** combines an embedded `scrcpy-server` H.264 -> WebCodecs `<canvas>` mirror (with automatic `screencap` fallback) and an integrated Agentic HUD in a single window — working cleanly on **Windows, macOS, and Linux Wayland/X11** while preserving passive learning by clicking and interactive HITL Approve/Cancel buttons.
 
 ---
 
@@ -64,73 +102,46 @@ Prompt: *"Navigate to Night Light"* from Launcher Home Screen:
 | **Total End-to-End Latency** | ~12,000–25,000 ms | **1,683 ms** (4 hops) |
 | **State Feedback** | Full PNG screenshots (`screencap`) | Sub-ms Shadow DOM NDJSON frames |
 
-| Standalone Agentic HUD Execution |
+| Agentic HUD Execution |
 | :---: |
 | ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
 
 ## Comparison with Alternatives
 
-Existing solutions rely on stateless ADB bindings, adding 2–4 seconds of latency per action and forcing the LLM to micromanage the UI step by step. DroidPath (and [AndOnMac](https://github.com/V0val0x/AndOnMac)) uses a persistent Directed Acyclic Graph (DAG) and A* routing on macOS, cutting latency to `<1s` per click and removing LLM overhead on known routes.
-
 | Tool | UI & Automation Model | Latency / Action | LLM Overhead |
 | :--- | :--- | :---: | :--- |
 | **Mobile MCP / Maestro MCP / adbridge** | Stateless ADB / `uiautomator` wrappers | 2–4 s | LLM plans every tap/scroll |
 | **Appium / CursorTouch** | WebDriver sessions or screenshot/coordinate loops | 2–5 s | Heavy screenshot / selector polling |
-| **DroidPath (+ AndOnMac)** | Persistent DAG + A* router + live Shadow DOM daemon | `<1s` / hop | `0` intermediate calls on known routes |
+| **DroidPath (Rust + Tauri v2 / AndOnMac)** | Persistent DAG + A\* router + live Shadow DOM daemon | `<1s` / hop | `0` intermediate calls on known routes |
 
 ---
 
-## Quick Start
+## Building from Source
 
-### 1. Build `droidpath-mcp` & `android-daemon.jar`
-
-Prerequisites: macOS 14+, Swift 5.9+, `adb` (`brew install android-platform-tools`), JDK 17 (only needed if rebuilding `android-daemon.jar` from Kotlin source).
+Prerequisites: Rust (`stable`), `adb` (Android Platform Tools), Node.js 18+ (for CLI / Tauri frontend), JDK 17 (only if rebuilding `android-daemon.jar`).
 
 ```bash
 git clone https://github.com/V0val0x/DroidPath.git
 cd DroidPath
 
-# Build standalone single-DEX Kotlin daemon (requires JDK 17 + Android d8 / build-tools or Gradle)
+# 1. Run all Rust core + MCP integration tests
+cargo test -p droidpath-core -p droidpath-mcp
+
+# 2. Build optimized native droidpath-mcp binary (~4 MB, zero JVM)
+cargo build --release -p droidpath-mcp
+
+# 3. Run Node.js 1-click CLI tests
+npm --prefix packages/droidpath-cli test
+
+# 4. Build & launch cross-platform Tauri v2 Desktop HUD
+cd apps/droidpath-desktop
+npm install
+npm run tauri dev      # or: npm run tauri build
+
+# 5. (Optional) Rebuild Kotlin single-DEX android-daemon.jar
 ./android-daemon/scripts/build-dex.sh
-
-# Run Swift + Kotlin tests
-swift test
-./android-daemon/gradlew -p android-daemon test
-
-# Build release CLI
-swift build -c release
+npm --prefix packages/droidpath-cli run sync-daemon
 ```
-
-Or download prebuilt `droidpath-mcp` and `android-daemon.jar` directly from [**GitHub Releases**](https://github.com/V0val0x/DroidPath/releases).
-
-### 2. Configure Claude Desktop / Cursor (`stdio`)
-
-```json
-{
-  "mcpServers": {
-    "droidpath": {
-      "command": "/path/to/droidpath-mcp",
-      "args": ["--stdio", "--daemon-jar", "/path/to/android-daemon.jar"]
-    }
-  }
-}
-```
-
-Or launch the loopback HTTP/SSE MCP server (`127.0.0.1:8766`):
-
-```bash
-droidpath-mcp --http --port 8766 --daemon-jar ./android-daemon/build/dist/android-daemon.jar
-```
-
-### 3. Use `AndroidShadowGraphKit` in Swift Package Manager
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/V0val0x/DroidPath.git", from: "1.0.0")
-]
-```
-
-Add `"AndroidShadowGraphKit"` (core Shadow DOM, Spatial Graph, and A\* engine) or `"DroidPathBridge"` (ADB deployer, persistence, and MCP core) to your target dependencies.
 
 ---
 
@@ -138,28 +149,20 @@ Add `"AndroidShadowGraphKit"` (core Shadow DOM, Spatial Graph, and A\* engine) o
 
 | Tool | Description |
 | :--- | :--- |
-| `android_navigate_to_node` | Runs Layer 3 A\* routing to reach a target text, `resource-id`, package, or canonical layout hash (`0x...`) across screens |
+| `android_navigate_to_node` | Runs Layer 3 A\* routing to reach a target text, `resource-id`, package, or canonical layout hash (`0x...`) across screens (supports `confirmed: true` for HITL) |
 | `android_get_ui_tree` | Reads live interactive UI elements from the Kotlin Shadow DOM stream (with `uiautomator` XML fallback) |
 | `android_graph_stats` | Inspects persisted graph vertex/edge counts, active canonical hash, daemon state, and storage path |
 | `android_list_devices` | Lists connected USB and Wireless ADB Android devices |
 | `android_tap_element` | Taps by `(x, y)` or semantic `text` / `resource_id` / `content_desc` and records the graph edge |
 | `android_swipe` | Swipes `(x1, y1) -> (x2, y2)` and attributes the gesture into the Spatial Graph |
-| `android_type_text` | Types text into the active Android field |
+| `android_type_text` | Types ASCII or Unicode text into the active Android field |
 | `android_keyevent` | Sends Android keyevents (`HOME`, `BACK`, `ENTER`, `APP_SWITCH`, `POWER`) |
 
 ---
 
-## Modular Open-Source Ecosystem
+## Ecosystem & macOS Native Companion
 
-Part of the native macOS ↔ Android automation suite alongside [**AndOnMac**](https://github.com/V0val0x/AndOnMac):
-
-- [**AndOnMac**](https://github.com/V0val0x/AndOnMac) — Native 120Hz ProMotion Metal Android mirroring & control app with built-in DroidPath Agentic HUD
-- [**AndroidMCPKit**](https://github.com/V0val0x/AndroidMCPKit) — Visual-to-MCP `{{parameter}}` macro studio & 3-tier Apple Vision OCR self-healing
-- [**MetalScrcpyKit**](https://github.com/V0val0x/MetalScrcpyKit) — Zero-copy VideoToolbox H.264/HEVC decoder & `CAMetalLayer` renderer
-- [**ADBConnectKit**](https://github.com/V0val0x/ADBConnectKit) — Zero-dependency Swift ADB SDK (USB, QR Wi-Fi pairing, Direct Hotspot bypass)
-- [**VisionScreenRecallKit**](https://github.com/V0val0x/VisionScreenRecallKit) — Apple Silicon Vision OCR & SQLite FTS5 screen memory
-
----
+- [**AndOnMac**](https://github.com/V0val0x/AndOnMac) — Native macOS 120Hz ProMotion VideoToolbox + Metal Android mirroring app with Swift `AndroidShadowGraphKit` (100% `shadow_graph.json` compatible with cross-platform DroidPath)
 
 ## License
 

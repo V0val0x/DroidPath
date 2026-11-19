@@ -7,22 +7,65 @@ on:
     branches: [ main ]
 
 jobs:
-  test-swift:
-    runs-on: macos-15
+  test-rust-core-and-mcp:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Run Swift tests
-        run: swift test
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust unit & integration tests (droidpath-core + droidpath-mcp)
+        run: cargo test -p droidpath-core -p droidpath-mcp
+
+  check-desktop-hud:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Linux Tauri system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Test & build Tauri v2 frontend (TypeScript + Vite)
+        working-directory: apps/droidpath-desktop
+        run: npm install && npm test && npm run build
+      - name: Test Tauri v2 Desktop Rust backend
+        run: cargo test -p droidpath-desktop
+
+  test-node-cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run zero-friction CLI unit tests
+        working-directory: packages/droidpath-cli
+        run: npm test
 
   test-kotlin-daemon:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Run Kotlin unit tests & verify DEX jar
+      - name: Run Kotlin unit tests & build JAR
         run: |
           chmod +x android-daemon/gradlew android-daemon/scripts/*.sh
           ./android-daemon/gradlew -p android-daemon test build
