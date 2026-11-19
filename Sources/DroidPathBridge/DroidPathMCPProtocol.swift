@@ -320,6 +320,10 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
                             "type": .string("integer"),
                             "description": .string("Per-step Shadow DOM settlement timeout in ms (250-10000). Default: 2000.")
                         ]),
+                        "confirmed": .object([
+                            "type": .string("boolean"),
+                            "description": .string("Set to true ONLY after explicit human confirmation in chat to execute hazardous/irreversible steps (payment, purchase, delete). Default: false.")
+                        ]),
                         "device_serial": serialProp
                     ]),
                     "required": .array([])
@@ -466,6 +470,7 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
                 let serial = try await adbRunner.resolveTargetSerial(arguments["device_serial"]?.stringValue)
                 let maxSteps = min(max(1, arguments["max_steps"]?.intValue ?? 12), 30)
                 let stepTimeoutMs = min(max(250, arguments["step_timeout_ms"]?.intValue ?? 2000), 10_000)
+                let confirmed = arguments["confirmed"]?.boolValue ?? false
 
                 do {
                     let outcome = try await manager.navigateToNode(
@@ -473,7 +478,8 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
                         target: target,
                         targetHash: targetHash,
                         maxSteps: maxSteps,
-                        stepTimeoutMs: stepTimeoutMs
+                        stepTimeoutMs: stepTimeoutMs,
+                        confirmed: confirmed
                     )
                     return Self.formatNavigationOutcome(outcome)
                 } catch let deviation as PathDeviationError {
@@ -688,6 +694,32 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
                 "total_elapsed_ms": .int(0)
             ])), isError: false)
 
+        case .requiresConfirmation(let req):
+            return .text(encodeJSON(.object([
+                "status": .string("requires_confirmation"),
+                "is_hazardous": .bool(true),
+                "hazard_category": .string(req.hazardCategory.rawValue),
+                "hazard_reason": .string(req.hazardReason),
+                "blocked_step_index": .int(req.stepIndex),
+                "total_steps": .int(req.totalSteps),
+                "steps_completed": .int(req.stepsCompleted),
+                "blocked_action": .string(req.actionSignature),
+                "target_description": .string(req.targetDescription),
+                "current_hash": .string(hex(req.currentHash)),
+                "target_hash": .string(hex(req.targetHash)),
+                "message": .string("Irreversible action blocked pending human approval. Ask the user in chat to confirm, then re-run android_navigate_to_node with confirmed: true.")
+            ])), isError: false)
+
+        case .secureScreenTimeout(let reason, let activePackage, let timeoutSeconds):
+            return .text(encodeJSON(.object([
+                "status": .string("secure_screen_active"),
+                "code": .string("SECURE_SCREEN_ACTIVE"),
+                "reason": .string(reason),
+                "active_package": .string(activePackage),
+                "timeout_seconds": .int(timeoutSeconds),
+                "message": .string("Protected biometric/PIN screen remained locked past \(timeoutSeconds)s. Ask the user to unlock on the phone and retry.")
+            ])), isError: true)
+
         case .noRoute(let startHash, let activePackage, let candidates, let reachableCount, let knownCount):
             return .text(encodeJSON(.object([
                 "status": .string("no_route"),
@@ -744,6 +776,19 @@ public final class DroidPathMCPServerCore: @unchecked Sendable {
             obj["last_observed_hash"] = lastObservedHash.map { .string(hex($0)) } ?? .null
             obj["last_observed_package"] = .string(lastObservedPackage)
             obj["timeout_ms"] = .int(timeoutMs)
+        case .requiresConfirmation(let req):
+            obj["status"] = .string("requires_confirmation")
+            obj["error_type"] = .string("requires_confirmation")
+            obj["hazard_category"] = .string(req.hazardCategory.rawValue)
+            obj["hazard_reason"] = .string(req.hazardReason)
+            obj["blocked_action"] = .string(req.actionSignature)
+            obj["blocked_step_index"] = .int(req.stepIndex)
+        case .secureScreenTimeout(let reason, let activePackage, let timeoutSeconds):
+            obj["status"] = .string("secure_screen_active")
+            obj["error_type"] = .string("secure_screen_timeout")
+            obj["reason"] = .string(reason)
+            obj["active_package"] = .string(activePackage)
+            obj["timeout_seconds"] = .int(timeoutSeconds)
         }
         return .text(encodeJSON(.object(obj)), isError: true)
     }

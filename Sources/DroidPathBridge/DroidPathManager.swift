@@ -287,6 +287,8 @@ public final class DroidPathManager: @unchecked Sendable {
         targetHash: UInt64?,
         maxSteps: Int = 12,
         stepTimeoutMs: Int = 2000,
+        confirmed: Bool = false,
+        secureHandoffTimeoutSeconds: TimeInterval = 60.0,
         executor: MacroActionExecutor? = nil
     ) async throws -> ShadowNavigationOutcome {
         await loadPersistedGraphIfNeeded()
@@ -298,7 +300,9 @@ public final class DroidPathManager: @unchecked Sendable {
             serial: serial,
             executor: activeExecutor,
             maxSteps: maxSteps,
-            stepTimeoutMs: stepTimeoutMs
+            stepTimeoutMs: stepTimeoutMs,
+            confirmed: confirmed,
+            secureHandoffTimeoutSeconds: secureHandoffTimeoutSeconds
         )
     }
 

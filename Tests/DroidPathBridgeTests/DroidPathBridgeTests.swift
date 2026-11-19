@@ -338,4 +338,38 @@ final class DroidPathBridgeTests: XCTestCase {
         }
         return String(decoding: full, as: UTF8.self)
     }
+
+    func testMCPFormattingSupportsRequiresConfirmationAndSecureScreenTimeout() {
+        let hitlRes = DroidPathMCPServerCore.formatNavigationOutcome(.requiresConfirmation(HazardousConfirmationRequest(
+            stepIndex: 1,
+            totalSteps: 2,
+            actionSignature: "tap:Buy Now",
+            targetDescription: "Buy Now",
+            hazardCategory: .payment,
+            hazardReason: "Blocked payment action 'Buy Now'",
+            currentHash: 0x1111,
+            targetHash: 0x2222,
+            stepsCompleted: 1,
+            tapX: 540,
+            tapY: 2050
+        )))
+        XCTAssertFalse(hitlRes.isError)
+        let hitlText = hitlRes.text
+        XCTAssertTrue(hitlText.contains(#""status":"requires_confirmation""#))
+        XCTAssertTrue(hitlText.contains(#""hazard_category":"payment""#))
+        XCTAssertTrue(hitlText.contains(#""blocked_step_index":1"#))
+
+        let secureRes = DroidPathMCPServerCore.formatNavigationOutcome(.secureScreenTimeout(
+            reason: "biometric_prompt",
+            activePackage: "com.bank.app",
+            timeoutSeconds: 60
+        ))
+        XCTAssertTrue(secureRes.isError)
+        let secureText = secureRes.text
+        XCTAssertTrue(secureText.contains(#""status":"secure_screen_active""#))
+        XCTAssertTrue(secureText.contains(#""SECURE_SCREEN_ACTIVE""#))
+
+        let navDef = DroidPathMCPServerCore.toolDefinitions().first(where: { $0.name == "android_navigate_to_node" })
+        XCTAssertNotNil(navDef?.inputSchema.objectValue?["properties"]?.objectValue?["confirmed"])
+    }
 }
