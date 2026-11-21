@@ -372,9 +372,7 @@ impl DaemonTcpClient {
             id,
         };
 
-        if let Err(err) = self.send(command).await {
-            return Err(err);
-        }
+        self.send(command).await?;
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(result))) => {
