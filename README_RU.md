@@ -74,12 +74,12 @@ flowchart LR
 
     Daemon <-->|"adb forward tcp:27189"| DOM
     Scrcpy <-->|"Loopback WS -> WebCodecs"| HUD
-    AStar -->|"adb shell input tap/swipe"| Sys
+    AStar -->|"TCP :27189 нативный ввод (ADB fallback)"| Daemon
     Daemon --- Sys
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM демон (`android-daemon/`):**
-   - Автономный **single-DEX JAR (650 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK.
+   - Автономный **single-DEX JAR (646 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK и выполняет нативный ввод `tap`/`swipe`/`keyevent` через `UiAutomation` напрямую по TCP `:27189` (с zero-fling 120Hz свайпами и авто-fallback на `adb`).
    - Реализует **Privacy by Design** на устройстве: привязывает TCP-сокет строго к локальной петле `127.0.0.1` (`adb forward`) и маскирует `isPassword` / чувствительные поля ввода на `"***"` до отправки по TCP (`:27189`).
    - Стримит полные снимки, инкрементальные NDJSON-диффы, привязку к основному окну приложения (`TYPE_APPLICATION`) под оверлеями `com.android.systemui` и события `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` при `FLAG_SECURE` / биометрии по TCP (`:27189`).
 
@@ -96,15 +96,13 @@ flowchart LR
 
 ## Замер на реальном устройстве (Pixel 10a · `android_navigate_to_node`)
 
-| Метрика | Классический VLM-цикл со скриншотами | **DroidPath A\* Router** |
-| :--- | :---: | :---: |
-| **Промежуточные вызовы LLM** | 4–5 обращений к vision-модели | **0 вызовов** |
-| **Полное время маршрута** | ~12 000–25 000 мс | **1 683 мс** (4 шага) |
-| **Обратная связь интерфейса** | Тяжёлые PNG (`screencap`) | Субмиллисекундные Shadow DOM кадры |
+Маршрут: *«Navigate to Show layout bounds»* (`Home > Settings > System > Developer Options > Show Layout Bounds`):
 
-| Исполнение A\* маршрута поверх Agentic HUD |
-| :---: |
-| ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
+| Метрика | Классический VLM-цикл со скриншотами | **DroidPath A\* + нативный демон (`:27189`)** |
+| :--- | :---: | :---: |
+| **Промежуточные вызовы LLM** | 7–9 обращений к vision-модели (~15k tok) | **0 вызовов (0 vision-токенов)** |
+| **Полное время маршрута** | ~30 000–40 000 мс (оценка) | **2 003 мс** (7 шагов · 1x live) |
+| **Обратная связь и ввод** | Тяжёлые PNG (`screencap`) + stateless ADB | Субмиллисекундный Shadow DOM NDJSON + нативный `UiAutomation` `:27189` |
 
 ## Comparison with Alternatives
 
