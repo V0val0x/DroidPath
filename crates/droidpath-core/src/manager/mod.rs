@@ -17,7 +17,9 @@ use crate::bridge::{
 use crate::protocol::{ShadowCompactNode, ShadowTreeMatchMode, ShadowUINode};
 use crate::router::{MacroActionExecutor, PathDeviationError};
 use crate::shadow_dom::ShadowDOMUpdate;
-use crate::spatial_graph::{AttributedUIAction, ScreenLayoutHasher, SpatialGraphEngine};
+use crate::spatial_graph::{
+    AttributedUIAction, ScreenLayoutHasher, SeedGraphCatalog, SpatialGraphEngine,
+};
 use crate::transport::{DaemonConnectionState, DaemonEndpointConfiguration};
 
 pub type PortForwarderHook =
@@ -29,6 +31,8 @@ pub type DaemonLauncherHook = Arc<
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DroidPathGraphStats {
     pub vertex_count: usize,
+    pub seed_vertex_count: usize,
+    pub hydrated_vertex_count: usize,
     pub edge_count: usize,
     pub current_state_hash: Option<u64>,
     pub current_package: String,
@@ -56,13 +60,19 @@ struct PersistenceInner {
 /// Debounced atomic persistence coordinator for `~/.droidpath/shadow_graph.json`.
 pub struct DroidPathPersistenceCoordinator {
     storage_path: PathBuf,
+    seed_default_graph: bool,
     inner: Mutex<PersistenceInner>,
 }
 
 impl DroidPathPersistenceCoordinator {
     pub fn new(storage_path: PathBuf) -> Self {
+        Self::new_with_seed(storage_path, false)
+    }
+
+    pub fn new_with_seed(storage_path: PathBuf, seed_default_graph: bool) -> Self {
         Self {
             storage_path,
+            seed_default_graph,
             inner: Mutex::new(PersistenceInner {
                 initialized: false,
                 save_task: None,
@@ -117,6 +127,14 @@ impl DroidPathPersistenceCoordinator {
             }
         }
 
+        if self.seed_default_graph
+            && std::env::var("DROIDPATH_DISABLE_SEED_GRAPH").as_deref() != Ok("1")
+        {
+            let _ = engine
+                .merge_seed_graph(SeedGraphCatalog::android_settings_seed_graph())
+                .await;
+        }
+
         let weak_self = Arc::downgrade(self);
         let engine_for_cb = Arc::clone(&engine);
         engine
@@ -162,6 +180,14 @@ impl DroidPathPersistenceCoordinator {
         let v_count = engine.vertex_count().await;
         let e_count = engine.edge_count().await;
         if v_count == 0 && e_count == 0 {
+            return;
+        }
+        // Avoid writing an untouched pure-seed graph to disk before any real device activity occurs.
+        if self.seed_default_graph
+            && engine.topology_revision().await == 0
+            && engine.hydrated_vertex_count().await == 0
+            && !self.storage_path.exists()
+        {
             return;
         }
 
@@ -261,6 +287,26 @@ impl DroidPathManager {
         port_forwarder: Option<PortForwarderHook>,
         daemon_launcher: Option<DaemonLauncherHook>,
     ) -> Arc<Self> {
+        Self::new_with_seed(
+            port,
+            storage_path,
+            daemon_jar_path,
+            adb_runner,
+            port_forwarder,
+            daemon_launcher,
+            false,
+        )
+    }
+
+    pub fn new_with_seed(
+        port: u16,
+        storage_path: PathBuf,
+        daemon_jar_path: Option<PathBuf>,
+        adb_runner: DroidPathAdbRunner,
+        port_forwarder: Option<PortForwarderHook>,
+        daemon_launcher: Option<DaemonLauncherHook>,
+        seed_default_graph: bool,
+    ) -> Arc<Self> {
         let bridge = Arc::new(ShadowGraphBridge::new(
             DaemonEndpointConfiguration::with_port(port),
             ScreenLayoutHasher::default(),
@@ -268,7 +314,10 @@ impl DroidPathManager {
         ));
         let manager = Arc::new(Self {
             bridge: Arc::clone(&bridge),
-            persistence: Arc::new(DroidPathPersistenceCoordinator::new(storage_path)),
+            persistence: Arc::new(DroidPathPersistenceCoordinator::new_with_seed(
+                storage_path,
+                seed_default_graph,
+            )),
             lifecycle_gate: Mutex::new(()),
             state: Mutex::new(ManagerState { has_started: false }),
             active_serial: Arc::new(RwLock::new(None)),
@@ -430,6 +479,8 @@ impl DroidPathManager {
     pub async fn graph_stats(&self) -> DroidPathGraphStats {
         self.load_persisted_graph_if_needed().await;
         let v_count = self.bridge.graph_engine.vertex_count().await;
+        let seed_count = self.bridge.graph_engine.seed_vertex_count().await;
+        let hydrated_count = self.bridge.graph_engine.hydrated_vertex_count().await;
         let e_count = self.bridge.graph_engine.edge_count().await;
         let hash = self.bridge.graph_engine.current_state_hash().await;
         let pkg = self
@@ -443,6 +494,8 @@ impl DroidPathManager {
         let fresh = self.bridge.dom_state.is_fresh(15.0).await;
         DroidPathGraphStats {
             vertex_count: v_count,
+            seed_vertex_count: seed_count,
+            hydrated_vertex_count: hydrated_count,
             edge_count: e_count,
             current_state_hash: hash,
             current_package: pkg,

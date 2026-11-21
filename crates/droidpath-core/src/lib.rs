@@ -47,8 +47,8 @@ pub use shadow_dom::{
 pub use spatial_graph::{
     AttributedUIAction, HazardCategory, HazardousActionAssessment, HazardousActionClassifier,
     RankedVertexMatch, ScreenLayoutHasher, ScreenSemanticFingerprint, ScreenStateVertex,
-    ScreenTransitionEdge, SpatialGraphEngine, SpatialGraphSnapshot, TopologyChangedHandler,
-    UIActionKind,
+    ScreenTransitionEdge, SeedGraphCatalog, SeedMergeReport, SpatialGraphEngine,
+    SpatialGraphSnapshot, TopologyChangedHandler, UIActionKind,
 };
 pub use transport::{
     BeforeReconnectHook, DaemonClientError, DaemonClientMetrics, DaemonConnectionState,

@@ -271,6 +271,7 @@ impl ShadowTreeIndex {
                 selector_resource_id: None,
                 selector_text: None,
                 selector_content_desc: None,
+                selector_aliases: Vec::new(),
                 timestamp,
             };
         };
@@ -300,6 +301,7 @@ impl ShadowTreeIndex {
             selector_text: (!node.text.is_empty()).then(|| node.text.clone()),
             selector_content_desc: (!node.content_desc.is_empty())
                 .then(|| node.content_desc.clone()),
+            selector_aliases: Vec::new(),
             timestamp,
         }
     }

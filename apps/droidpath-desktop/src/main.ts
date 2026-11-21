@@ -202,7 +202,12 @@ async function refreshGraph(): Promise<void> {
 }
 
 function updateStatsUI(stats: DroidPathGraphStats): void {
-  statVertices.textContent = String(stats.vertexCount);
+  const seedCount = stats.seedVertexCount ?? 0;
+  const hydratedCount = stats.hydratedVertexCount ?? Math.max(0, stats.vertexCount - seedCount);
+  statVertices.textContent =
+    seedCount > 0
+      ? `${stats.vertexCount} (${hydratedCount} real · ${seedCount} seed)`
+      : String(stats.vertexCount);
   statEdges.textContent = String(stats.edgeCount);
   statPackage.textContent = stats.currentPackage || "—";
   statHash.textContent = stats.currentStateHashHex ?? "—";
@@ -213,7 +218,7 @@ function updateStatsUI(stats: DroidPathGraphStats): void {
     : `Daemon: ${stats.connectionState.status}`;
   pillDaemon.className = isLive ? "pill pill-ok" : "pill";
 
-  const graphSig = `${stats.vertexCount}:${stats.edgeCount}:${stats.currentStateHashHex ?? ""}`;
+  const graphSig = `${stats.vertexCount}:${hydratedCount}:${seedCount}:${stats.edgeCount}:${stats.currentStateHashHex ?? ""}`;
   if (graphSig !== lastGraphSignature) {
     lastGraphSignature = graphSig;
     void refreshGraph();
@@ -300,6 +305,7 @@ async function runNavigation(
       target,
       targetHash,
       confirmed,
+      autoExplore: true,
     });
     navResult.textContent = JSON.stringify(res, null, 2);
     appendLog(`A* route result: ${String(res.status ?? "done")}`);

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.V0val0x/droidpath",
+  "title": "DroidPath",
+  "description": "Persistent A* UI router & Shadow DOM MCP server for autonomous Android control (Win/Linux/macOS)",
+  "version": "2.2.0",
+  "websiteUrl": "https://github.com/V0val0x/DroidPath",
+  "repository": {
+    "url": "https://github.com/V0val0x/DroidPath",
+    "source": "github",
+    "id": "1459158544"
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "distribution": "github-releases",
+      "transports": ["stdio", "sse"],
+      "platforms": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc"
+      ],
+      "checksumsUrl": "https://github.com/V0val0x/DroidPath/releases/download/v2.2.0/checksums.txt",
+      "installScripts": {
+        "unix": "https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh",
+        "windows": "https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1"
+      }
+    }
+  }
+}

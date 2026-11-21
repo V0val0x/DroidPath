@@ -15,6 +15,7 @@ use super::models::{
     AttributedUIAction, RankedVertexMatch, ScreenStateVertex, ScreenTransitionEdge,
     SpatialGraphSnapshot,
 };
+use super::seed::{SeedGraphCatalog, SeedMergeReport};
 
 pub type TopologyChangedHandler =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
@@ -89,6 +90,26 @@ impl SpatialGraphEngine {
 
     pub async fn vertex_count(&self) -> usize {
         self.inner.lock().await.vertices.len()
+    }
+
+    pub async fn seed_vertex_count(&self) -> usize {
+        self.inner
+            .lock()
+            .await
+            .vertices
+            .values()
+            .filter(|v| v.is_seed)
+            .count()
+    }
+
+    pub async fn hydrated_vertex_count(&self) -> usize {
+        self.inner
+            .lock()
+            .await
+            .vertices
+            .values()
+            .filter(|v| !v.is_seed)
+            .count()
     }
 
     pub async fn edge_count(&self) -> usize {
@@ -245,6 +266,7 @@ impl SpatialGraphEngine {
                 existing.last_traversed_at = now;
                 existing.action = Some(redacted);
                 existing.consecutive_failures = 0;
+                existing.is_seed = false;
                 if hazard.is_hazardous {
                     existing.is_hazardous = true;
                     existing.hazard_reason = Some(hazard.reason());
@@ -264,10 +286,466 @@ impl SpatialGraphEngine {
                     is_hazardous: hazard.is_hazardous,
                     hazard_reason: hazard.is_hazardous.then(|| hazard.reason()),
                     consecutive_failures: 0,
+                    is_seed: false,
                 };
                 edges.push(edge.clone());
                 edge
             };
+            g.topology_revision = g.topology_revision.wrapping_add(1);
+            let handler = g.on_topology_changed.clone();
+            (Some(committed), handler)
+        };
+
+        if let Some(h) = notify_handler {
+            tokio::spawn(async move { h().await });
+        }
+        result
+    }
+
+    fn merge_aliases(dst: &mut Vec<String>, src: &[String]) -> usize {
+        let mut added = 0usize;
+        for raw in src {
+            let safe = ScreenLayoutHasher::redact_pii(raw.trim());
+            if safe.is_empty() {
+                continue;
+            }
+            if !dst.iter().any(|e| e.eq_ignore_ascii_case(&safe)) {
+                dst.push(safe);
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Idempotently merges a Zero-PII cross-device Seed Graph into the engine without overwriting
+    /// existing real vertices or edges and without forcing a disk save until real activity occurs.
+    pub async fn merge_seed_graph(&self, seed: SpatialGraphSnapshot) -> SeedMergeReport {
+        let mut g = self.inner.lock().await;
+        let mut report = SeedMergeReport::default();
+        let mut seed_to_canonical: HashMap<u64, u64> = HashMap::with_capacity(seed.vertices.len());
+
+        for mut sv in seed.vertices {
+            sv.is_seed = true;
+            sv.visit_count = 0;
+            sv.sample_interactive_labels = sv
+                .sample_interactive_labels
+                .into_iter()
+                .map(|l| ScreenLayoutHasher::redact_pii(&l))
+                .collect();
+            sv.semantic_aliases = sv
+                .semantic_aliases
+                .into_iter()
+                .map(|a| ScreenLayoutHasher::redact_pii(&a))
+                .collect();
+
+            if let Some(existing) = g.vertices.get_mut(&sv.layout_hash) {
+                report.aliases_merged +=
+                    Self::merge_aliases(&mut existing.semantic_aliases, &sv.semantic_aliases);
+                seed_to_canonical.insert(sv.layout_hash, sv.layout_hash);
+                continue;
+            }
+
+            // If an already-hydrated real vertex matches this seed screen semantically,
+            // link the seed onto that real vertex and inherit aliases instead of duplicating.
+            let matching_real_hash = g
+                .vertices
+                .values()
+                .filter(|v| !v.is_seed && v.active_package == sv.active_package)
+                .filter_map(|v| {
+                    let score = SeedGraphCatalog::seed_match_score_for_vertex(v, &sv);
+                    (score >= SeedGraphCatalog::SEED_MATCH_THRESHOLD)
+                        .then_some((v.layout_hash, score, v.visit_count))
+                })
+                .max_by(|a, b| {
+                    a.1.total_cmp(&b.1)
+                        .then_with(|| a.2.cmp(&b.2))
+                        .then_with(|| b.0.cmp(&a.0))
+                })
+                .map(|(h, _, _)| h);
+
+            if let Some(real_hash) = matching_real_hash {
+                if let Some(real_v) = g.vertices.get_mut(&real_hash) {
+                    report.aliases_merged +=
+                        Self::merge_aliases(&mut real_v.semantic_aliases, &sv.semantic_aliases);
+                }
+                seed_to_canonical.insert(sv.layout_hash, real_hash);
+                continue;
+            }
+
+            let h = sv.layout_hash;
+            g.vertices.insert(h, sv);
+            seed_to_canonical.insert(h, h);
+            report.vertices_added += 1;
+        }
+
+        if g.root_state_hash.is_none() {
+            if let Some(seed_root) = seed.root_state_hash {
+                let mapped = seed_to_canonical
+                    .get(&seed_root)
+                    .copied()
+                    .unwrap_or(seed_root);
+                if g.vertices.contains_key(&mapped) {
+                    g.root_state_hash = Some(mapped);
+                }
+            }
+        }
+
+        for mut se in seed.edges {
+            se.is_seed = true;
+            se.action = se.action.map(|a| a.redacted_for_storage());
+            se.action_signature = ScreenLayoutHasher::redact_pii(&se.action_signature);
+
+            let mapped_from = seed_to_canonical
+                .get(&se.from_hash)
+                .copied()
+                .unwrap_or(se.from_hash);
+            let mapped_to = seed_to_canonical
+                .get(&se.to_hash)
+                .copied()
+                .unwrap_or(se.to_hash);
+            if mapped_from == mapped_to
+                || !g.vertices.contains_key(&mapped_from)
+                || !g.vertices.contains_key(&mapped_to)
+            {
+                continue;
+            }
+
+            let edges = g.outgoing_edges.entry(mapped_from).or_default();
+            let already_covered = edges.iter().any(|existing| {
+                existing.to_hash == mapped_to
+                    && (existing.action_signature == se.action_signature || !existing.is_seed)
+            });
+            if already_covered {
+                continue;
+            }
+
+            se.from_hash = mapped_from;
+            se.to_hash = mapped_to;
+            edges.push(se);
+            report.edges_added += 1;
+        }
+
+        if report.vertices_added > 0 || report.edges_added > 0 {
+            Self::rebuild_spanning_dag(&mut g);
+        }
+
+        report
+    }
+
+    fn best_seed_match(
+        vertices: &HashMap<u64, ScreenStateVertex>,
+        fp: &ScreenSemanticFingerprint,
+    ) -> Option<ScreenStateVertex> {
+        let mut best: Option<(&ScreenStateVertex, f64)> = None;
+        for v in vertices.values() {
+            if !v.is_seed || v.active_package != fp.active_package {
+                continue;
+            }
+            let score = SeedGraphCatalog::seed_match_score(fp, v);
+            if score < SeedGraphCatalog::SEED_MATCH_THRESHOLD {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some((cur_v, cur_score)) => {
+                    score > cur_score
+                        || (score == cur_score && v.layout_hash < cur_v.layout_hash)
+                }
+            };
+            if replace {
+                best = Some((v, score));
+            }
+        }
+        best.map(|(v, _)| v.clone())
+    }
+
+    fn hydrate_seed_vertex_inner(
+        g: &mut GraphInner,
+        seed_hash: u64,
+        live_fp: &ScreenSemanticFingerprint,
+        now: DateTime<Utc>,
+        increment_existing_visit: bool,
+    ) -> (u64, bool) {
+        let real_hash = live_fp.layout_hash;
+        let is_seed_present = g
+            .vertices
+            .get(&seed_hash)
+            .map(|v| v.is_seed)
+            .unwrap_or(false);
+
+        if !is_seed_present {
+            if let Some(existing) = g.vertices.get_mut(&real_hash) {
+                existing.last_seen_at = now;
+                if increment_existing_visit {
+                    existing.visit_count = existing.visit_count.max(0) + 1;
+                } else {
+                    existing.visit_count = existing.visit_count.max(1);
+                }
+                if existing.semantic_tokens.is_empty() && !live_fp.tokens.is_empty() {
+                    existing.semantic_tokens = live_fp.tokens.clone();
+                }
+                return (real_hash, false);
+            }
+            let parent_hash = g.current_state_hash.filter(|&h| h != real_hash);
+            let parent_depth = parent_hash
+                .and_then(|ph| g.vertices.get(&ph))
+                .map(|v| v.discovery_depth + 1)
+                .unwrap_or(0);
+            g.vertices.insert(
+                real_hash,
+                ScreenStateVertex {
+                    layout_hash: real_hash,
+                    active_package: live_fp.active_package.clone(),
+                    sample_interactive_labels: live_fp.sample_interactive_labels.clone(),
+                    semantic_tokens: live_fp.tokens.clone(),
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    visit_count: 1,
+                    discovery_parent_hash: parent_hash,
+                    discovery_depth: parent_depth,
+                    is_seed: false,
+                    semantic_aliases: Vec::new(),
+                },
+            );
+            return (real_hash, true);
+        }
+
+        if seed_hash == real_hash {
+            if let Some(v) = g.vertices.get_mut(&seed_hash) {
+                v.is_seed = false;
+                v.sample_interactive_labels = live_fp.sample_interactive_labels.clone();
+                v.semantic_tokens = live_fp.tokens.clone();
+                v.last_seen_at = now;
+                v.visit_count = v.visit_count.max(0) + 1;
+            }
+            return (real_hash, true);
+        }
+
+        let Some(seed_vertex) = g.vertices.remove(&seed_hash) else {
+            return (real_hash, false);
+        };
+
+        if let Some(existing_real) = g.vertices.get_mut(&real_hash) {
+            existing_real.is_seed = false;
+            existing_real.last_seen_at = now;
+            existing_real.visit_count = existing_real.visit_count.max(0) + 1;
+            if existing_real.semantic_tokens.is_empty() && !live_fp.tokens.is_empty() {
+                existing_real.semantic_tokens = live_fp.tokens.clone();
+            }
+            if existing_real.sample_interactive_labels.is_empty() {
+                existing_real.sample_interactive_labels = live_fp.sample_interactive_labels.clone();
+            }
+            Self::merge_aliases(
+                &mut existing_real.semantic_aliases,
+                &seed_vertex.semantic_aliases,
+            );
+        } else {
+            let mut aliases = Vec::new();
+            Self::merge_aliases(&mut aliases, &seed_vertex.semantic_aliases);
+            g.vertices.insert(
+                real_hash,
+                ScreenStateVertex {
+                    layout_hash: real_hash,
+                    active_package: live_fp.active_package.clone(),
+                    sample_interactive_labels: live_fp.sample_interactive_labels.clone(),
+                    semantic_tokens: live_fp.tokens.clone(),
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    visit_count: 1,
+                    discovery_parent_hash: seed_vertex
+                        .discovery_parent_hash
+                        .filter(|&p| p != real_hash && p != seed_hash),
+                    discovery_depth: seed_vertex.discovery_depth,
+                    is_seed: false,
+                    semantic_aliases: aliases,
+                },
+            );
+        }
+
+        // Rewire outgoing edges from seed_hash -> real_hash
+        if let Some(seed_out) = g.outgoing_edges.remove(&seed_hash) {
+            let dest_out = g.outgoing_edges.entry(real_hash).or_default();
+            for mut edge in seed_out {
+                edge.from_hash = real_hash;
+                if edge.to_hash == real_hash {
+                    continue;
+                }
+                let duplicate = dest_out.iter().any(|e| {
+                    e.to_hash == edge.to_hash
+                        && (e.action_signature == edge.action_signature
+                            || (!e.is_seed && edge.is_seed))
+                });
+                if !duplicate {
+                    dest_out.push(edge);
+                }
+            }
+        }
+
+        // Rewire incoming edges targeting seed_hash -> real_hash
+        let from_keys: Vec<u64> = g.outgoing_edges.keys().copied().collect();
+        for fk in from_keys {
+            if let Some(edges) = g.outgoing_edges.get_mut(&fk) {
+                let mut rewritten: Vec<ScreenTransitionEdge> = Vec::with_capacity(edges.len());
+                for mut edge in std::mem::take(edges) {
+                    if edge.to_hash == seed_hash {
+                        edge.to_hash = real_hash;
+                    }
+                    if edge.from_hash == edge.to_hash {
+                        continue;
+                    }
+                    if let Some(existing) = rewritten.iter_mut().find(|e| {
+                        e.to_hash == edge.to_hash && e.action_signature == edge.action_signature
+                    }) {
+                        if existing.is_seed && !edge.is_seed {
+                            *existing = edge;
+                        }
+                    } else {
+                        rewritten.push(edge);
+                    }
+                }
+                *edges = rewritten;
+            }
+        }
+        g.outgoing_edges.retain(|_, v| !v.is_empty());
+
+        if g.root_state_hash == Some(seed_hash) {
+            g.root_state_hash = Some(real_hash);
+        }
+        if g.current_state_hash == Some(seed_hash) {
+            g.current_state_hash = Some(real_hash);
+        }
+
+        Self::rebuild_spanning_dag(g);
+        (real_hash, true)
+    }
+
+    /// Promotes a Seed Graph vertex (`is_seed == true`) into a real device-calibrated vertex
+    /// while rewiring all remaining unvisited outgoing/incoming seed edges onto the real hash.
+    pub async fn hydrate_seed_vertex(
+        &self,
+        seed_hash: u64,
+        live_fp: &ScreenSemanticFingerprint,
+    ) -> u64 {
+        let now = Utc::now();
+        let (real_hash, notify_handler) = {
+            let mut g = self.inner.lock().await;
+            let (rh, changed) =
+                Self::hydrate_seed_vertex_inner(&mut g, seed_hash, live_fp, now, true);
+            let handler = if changed {
+                g.topology_revision = g.topology_revision.wrapping_add(1);
+                g.on_topology_changed.clone()
+            } else {
+                None
+            };
+            (rh, handler)
+        };
+        if let Some(h) = notify_handler {
+            tokio::spawn(async move { h().await });
+        }
+        real_hash
+    }
+
+    /// Promotes a traversed Seed Graph transition (`from -> to`) into a real, coordinate-calibrated,
+    /// device-specific vertex pair and executable edge (`is_seed: false`), rewiring remaining unvisited
+    /// seed branches onto the newly hydrated real vertices.
+    pub async fn hydrate_seed_transition(
+        &self,
+        from_seed_or_real_hash: u64,
+        to_seed_or_real_hash: u64,
+        real_from_fp: &ScreenSemanticFingerprint,
+        real_to_fp: &ScreenSemanticFingerprint,
+        resolved_action: AttributedUIAction,
+        transition_ms: f64,
+    ) -> Option<ScreenTransitionEdge> {
+        let now = Utc::now();
+        let redacted = resolved_action.redacted_for_storage();
+        let action_sig = redacted.signature();
+        let hazard = HazardousActionClassifier::assess(Some(&redacted), &action_sig, None, None);
+
+        let (result, notify_handler) = {
+            let mut g = self.inner.lock().await;
+            let (real_from_hash, _) = Self::hydrate_seed_vertex_inner(
+                &mut g,
+                from_seed_or_real_hash,
+                real_from_fp,
+                now,
+                false,
+            );
+            let (real_to_hash, _) = Self::hydrate_seed_vertex_inner(
+                &mut g,
+                to_seed_or_real_hash,
+                real_to_fp,
+                now,
+                false,
+            );
+
+            if real_from_hash == real_to_hash {
+                g.current_state_hash = Some(real_to_hash);
+                g.current_fingerprint = Some(real_to_fp.clone());
+                g.topology_revision = g.topology_revision.wrapping_add(1);
+                return None;
+            }
+
+            let edges = g.outgoing_edges.entry(real_from_hash).or_default();
+            // Drop stale coordinate-free seed edge(s) and unattributed implicit edges
+            // connecting this exact pair now that we have a calibrated real edge.
+            let mut removed_spanning_seed = false;
+            edges.retain(|e| {
+                let drop_edge = e.to_hash == real_to_hash
+                    && (e.is_seed || (e.action.is_none() && e.action_signature == "implicit"));
+                if drop_edge && e.is_spanning_tree_edge {
+                    removed_spanning_seed = true;
+                }
+                !drop_edge
+            });
+
+            let committed = if let Some(existing) = edges
+                .iter_mut()
+                .find(|e| e.to_hash == real_to_hash && e.action_signature == action_sig)
+            {
+                let just_recorded_by_live_pump = !existing.is_seed
+                    && existing.traversal_count >= 1
+                    && (now - existing.last_traversed_at).num_milliseconds().abs() < 2_000;
+                if !just_recorded_by_live_pump {
+                    let old_count = existing.traversal_count.max(0) as f64;
+                    existing.traversal_count = existing.traversal_count.max(0) + 1;
+                    existing.average_transition_ms =
+                        ((existing.average_transition_ms * old_count) + transition_ms)
+                            / (existing.traversal_count as f64);
+                }
+                existing.last_traversed_at = now;
+                existing.action = Some(redacted);
+                existing.consecutive_failures = 0;
+                existing.is_seed = false;
+                if hazard.is_hazardous {
+                    existing.is_hazardous = true;
+                    existing.hazard_reason = Some(hazard.reason());
+                }
+                existing.clone()
+            } else {
+                let edge = ScreenTransitionEdge {
+                    id: Uuid::new_v4(),
+                    from_hash: real_from_hash,
+                    to_hash: real_to_hash,
+                    action: Some(redacted),
+                    action_signature: action_sig,
+                    traversal_count: 1,
+                    average_transition_ms: transition_ms,
+                    is_spanning_tree_edge: removed_spanning_seed,
+                    last_traversed_at: now,
+                    is_hazardous: hazard.is_hazardous,
+                    hazard_reason: hazard.is_hazardous.then(|| hazard.reason()),
+                    consecutive_failures: 0,
+                    is_seed: false,
+                };
+                edges.push(edge.clone());
+                edge
+            };
+
+            g.current_state_hash = Some(real_to_hash);
+            g.current_fingerprint = Some(real_to_fp.clone());
+            g.last_state_transition_at = Some(now);
+            Self::rebuild_spanning_dag(&mut g);
             g.topology_revision = g.topology_revision.wrapping_add(1);
             let handler = g.on_topology_changed.clone();
             (Some(committed), handler)
@@ -300,6 +778,12 @@ impl SpatialGraphEngine {
                 if let Some(exact) = g.vertices.get_mut(&fp.layout_hash) {
                     exact.last_seen_at = now;
                     exact.visit_count += 1;
+                    let was_seed = exact.is_seed;
+                    if was_seed {
+                        exact.is_seed = false;
+                        exact.sample_interactive_labels = fp.sample_interactive_labels.clone();
+                        exact.semantic_tokens = fp.tokens.clone();
+                    }
                     let exact_clone = exact.clone();
                     if g.root_state_hash.is_none() {
                         g.root_state_hash = Some(exact_clone.layout_hash);
@@ -309,6 +793,16 @@ impl SpatialGraphEngine {
                         Some(Self::canonical_fingerprint(&exact_clone, fp.active_window_id));
                     g.last_state_transition_at = Some(now);
                     g.pending_action = None;
+                    let handler = if was_seed {
+                        g.topology_revision = g.topology_revision.wrapping_add(1);
+                        g.on_topology_changed.clone()
+                    } else {
+                        None
+                    };
+                    drop(g);
+                    if let Some(h) = handler {
+                        tokio::spawn(async move { h().await });
+                    }
                     return None;
                 }
                 if let Some(mut canonical) =
@@ -328,6 +822,29 @@ impl SpatialGraphEngine {
                     g.pending_action = None;
                     return None;
                 }
+                if let Some(seed_match) = Self::best_seed_match(&g.vertices, &fp) {
+                    let (real_hash, _) = Self::hydrate_seed_vertex_inner(
+                        &mut g,
+                        seed_match.layout_hash,
+                        &fp,
+                        now,
+                        true,
+                    );
+                    if g.root_state_hash.is_none() {
+                        g.root_state_hash = Some(real_hash);
+                    }
+                    g.current_state_hash = Some(real_hash);
+                    g.current_fingerprint = Some(fp);
+                    g.last_state_transition_at = Some(now);
+                    g.pending_action = None;
+                    g.topology_revision = g.topology_revision.wrapping_add(1);
+                    let handler = g.on_topology_changed.clone();
+                    drop(g);
+                    if let Some(h) = handler {
+                        tokio::spawn(async move { h().await });
+                    }
+                    return None;
+                }
                 let root = ScreenStateVertex {
                     layout_hash: fp.layout_hash,
                     active_package: fp.active_package.clone(),
@@ -338,6 +855,8 @@ impl SpatialGraphEngine {
                     visit_count: 1,
                     discovery_parent_hash: None,
                     discovery_depth: 0,
+                    is_seed: false,
+                    semantic_aliases: Vec::new(),
                 };
                 g.vertices.insert(fp.layout_hash, root);
                 if g.root_state_hash.is_none() {
@@ -397,8 +916,9 @@ impl SpatialGraphEngine {
                 }
             }
 
-            // 6. Cross-app / post-transition canonical deduplication
+            // 6. Cross-app / post-transition canonical deduplication & Seed-to-Real hydration
             let mut resolved_fp = fp.clone();
+            let mut did_hydrate_seed = false;
             if !is_already_known {
                 if let Some(canonical) =
                     Self::best_canonical_match(&g.vertices, &fp, self.significance_threshold)
@@ -410,6 +930,17 @@ impl SpatialGraphEngine {
                         return None;
                     }
                     resolved_fp = Self::canonical_fingerprint(&canonical, fp.active_window_id);
+                } else if let Some(seed_match) = Self::best_seed_match(&g.vertices, &fp) {
+                    if seed_match.layout_hash != prev_hash {
+                        let _ = Self::hydrate_seed_vertex_inner(
+                            &mut g,
+                            seed_match.layout_hash,
+                            &fp,
+                            now,
+                            true,
+                        );
+                        did_hydrate_seed = true;
+                    }
                 }
             }
 
@@ -424,11 +955,19 @@ impl SpatialGraphEngine {
             let transition_ms = (now - ref_time).num_milliseconds().max(0) as f64;
 
             let is_new_discovery;
-            let mut did_upgrade_tokens = false;
+            let mut did_upgrade_tokens = did_hydrate_seed;
             if let Some(existing) = g.vertices.get_mut(&resolved_fp.layout_hash) {
                 existing.last_seen_at = now;
-                existing.visit_count += 1;
-                if existing.semantic_tokens.is_empty() && !resolved_fp.tokens.is_empty() {
+                if !did_hydrate_seed {
+                    existing.visit_count += 1;
+                }
+                if existing.is_seed {
+                    existing.is_seed = false;
+                    existing.sample_interactive_labels =
+                        resolved_fp.sample_interactive_labels.clone();
+                    existing.semantic_tokens = resolved_fp.tokens.clone();
+                    did_upgrade_tokens = true;
+                } else if existing.semantic_tokens.is_empty() && !resolved_fp.tokens.is_empty() {
                     existing.semantic_tokens = resolved_fp.tokens.clone();
                     did_upgrade_tokens = true;
                 }
@@ -449,6 +988,8 @@ impl SpatialGraphEngine {
                     visit_count: 1,
                     discovery_parent_hash: Some(prev_hash),
                     discovery_depth: parent_depth + 1,
+                    is_seed: false,
+                    semantic_aliases: Vec::new(),
                 };
                 g.vertices.insert(resolved_fp.layout_hash, vertex);
                 g.spanning_children
@@ -466,6 +1007,9 @@ impl SpatialGraphEngine {
                 HazardousActionClassifier::assess(attributed_action.as_ref(), &action_sig, None, None);
 
             let edges = g.outgoing_edges.entry(prev_hash).or_default();
+            if attributed_action.is_some() {
+                edges.retain(|e| !(e.to_hash == resolved_fp.layout_hash && e.is_seed));
+            }
             let committed_edge;
             let is_new_edge;
 
@@ -480,6 +1024,10 @@ impl SpatialGraphEngine {
                         / (existing.traversal_count as f64);
                 existing.last_traversed_at = now;
                 existing.consecutive_failures = 0;
+                existing.is_seed = false;
+                if let Some(act) = attributed_action {
+                    existing.action = Some(act);
+                }
                 if hazard.is_hazardous && !existing.is_hazardous {
                     existing.is_hazardous = true;
                     existing.hazard_reason = Some(hazard.reason());
@@ -500,10 +1048,14 @@ impl SpatialGraphEngine {
                     is_hazardous: hazard.is_hazardous,
                     hazard_reason: hazard.is_hazardous.then(|| hazard.reason()),
                     consecutive_failures: 0,
+                    is_seed: false,
                 };
                 committed_edge = edge.clone();
                 edges.push(edge);
                 is_new_edge = true;
+            }
+            if did_hydrate_seed {
+                Self::rebuild_spanning_dag(&mut g);
             }
 
             g.current_state_hash = Some(resolved_fp.layout_hash);
@@ -553,7 +1105,10 @@ impl SpatialGraphEngine {
         let mut best_sim = 0.0_f64;
 
         for vertex in vertices.values() {
-            if vertex.active_package != fp.active_package || vertex.semantic_tokens.is_empty() {
+            if vertex.is_seed
+                || vertex.active_package != fp.active_package
+                || vertex.semantic_tokens.is_empty()
+            {
                 continue;
             }
             let sim = ScreenLayoutHasher::jaccard_similarity(&vertex.semantic_tokens, &fp.tokens);
@@ -721,6 +1276,11 @@ impl SpatialGraphEngine {
                 .into_iter()
                 .map(|l| ScreenLayoutHasher::redact_pii(&l))
                 .collect();
+            vertex.semantic_aliases = vertex
+                .semantic_aliases
+                .into_iter()
+                .map(|a| ScreenLayoutHasher::redact_pii(&a))
+                .collect();
             if !vertex.semantic_tokens.is_empty() {
                 let canonicalized: BTreeSet<String> = vertex
                     .semantic_tokens
@@ -751,6 +1311,8 @@ impl SpatialGraphEngine {
                 } else {
                     existing.semantic_tokens
                 };
+                let mut merged_aliases = existing.semantic_aliases;
+                Self::merge_aliases(&mut merged_aliases, &vertex.semantic_aliases);
                 let keep_existing_discovery = existing.first_seen_at <= vertex.first_seen_at;
                 raw_vertices_by_hash.insert(
                     existing.layout_hash,
@@ -772,6 +1334,8 @@ impl SpatialGraphEngine {
                         } else {
                             vertex.discovery_depth
                         },
+                        is_seed: existing.is_seed && vertex.is_seed,
+                        semantic_aliases: merged_aliases,
                     },
                 );
             } else {
@@ -789,6 +1353,7 @@ impl SpatialGraphEngine {
             let rhs_is_root = Some(rhs.layout_hash) == snapshot.root_state_hash;
             rhs_is_root
                 .cmp(&lhs_is_root)
+                .then_with(|| lhs.is_seed.cmp(&rhs.is_seed))
                 .then_with(|| rhs.visit_count.cmp(&lhs.visit_count))
                 .then_with(|| lhs.first_seen_at.cmp(&rhs.first_seen_at))
                 .then_with(|| rhs.semantic_tokens.len().cmp(&lhs.semantic_tokens.len()))
@@ -805,13 +1370,13 @@ impl SpatialGraphEngine {
             let mut matched_leader_hash: Option<u64> = None;
             let mut best_similarity = 0.0_f64;
 
-            if !vertex.semantic_tokens.is_empty() {
+            if !vertex.is_seed && !vertex.semantic_tokens.is_empty() {
                 if let Some(package_leaders) = leaders_by_package.get(&vertex.active_package) {
                     for &leader_hash in package_leaders {
                         let Some(leader) = canonical_vertices.get(&leader_hash) else {
                             continue;
                         };
-                        if leader.semantic_tokens.is_empty() {
+                        if leader.is_seed || leader.semantic_tokens.is_empty() {
                             continue;
                         }
                         let sim = ScreenLayoutHasher::jaccard_similarity(
@@ -840,6 +1405,8 @@ impl SpatialGraphEngine {
                     if leader.sample_interactive_labels.is_empty() {
                         leader.sample_interactive_labels = vertex.sample_interactive_labels;
                     }
+                    Self::merge_aliases(&mut leader.semantic_aliases, &vertex.semantic_aliases);
+                    leader.is_seed = leader.is_seed && vertex.is_seed;
                     leader.first_seen_at = leader.first_seen_at.min(vertex.first_seen_at);
                     leader.last_seen_at = leader.last_seen_at.max(vertex.last_seen_at);
                     leader.visit_count += vertex.visit_count.max(0);
@@ -957,6 +1524,7 @@ impl SpatialGraphEngine {
                         is_hazardous: merged_hazardous,
                         hazard_reason: if merged_hazardous { merged_reason } else { None },
                         consecutive_failures: merged_failures,
+                        is_seed: existing.is_seed && edge.is_seed,
                     },
                 );
             } else {
@@ -985,6 +1553,7 @@ impl SpatialGraphEngine {
                         is_hazardous: is_haz,
                         hazard_reason: if is_haz { haz_reason } else { None },
                         consecutive_failures: edge.consecutive_failures.max(0),
+                        is_seed: edge.is_seed,
                     },
                 );
                 ordered_edge_keys.push(key);
@@ -1347,12 +1916,15 @@ impl SpatialGraphEngine {
             let Some(ref action) = edge.action else {
                 continue;
             };
-            let candidates = [
+            let mut candidates: Vec<&str> = vec![
                 action.target_description.as_str(),
                 action.selector_text.as_deref().unwrap_or(""),
                 action.selector_resource_id.as_deref().unwrap_or(""),
                 action.selector_content_desc.as_deref().unwrap_or(""),
             ];
+            for alias in &action.selector_aliases {
+                candidates.push(alias.as_str());
+            }
             let mut boost = 0;
             for raw in candidates {
                 if raw.is_empty() {
@@ -1386,6 +1958,20 @@ impl SpatialGraphEngine {
                 base_score = base_score.max(500);
             } else if pkg.contains(&q) {
                 base_score = base_score.max(220);
+            }
+
+            for alias in &vertex.semantic_aliases {
+                if alias.is_empty() {
+                    continue;
+                }
+                let lower = alias.to_lowercase();
+                if lower == q {
+                    base_score = base_score.max(860);
+                } else if lower.starts_with(&q) {
+                    base_score = base_score.max(460);
+                } else if lower.contains(&q) {
+                    base_score = base_score.max(210);
+                }
             }
 
             for (idx, label) in vertex.sample_interactive_labels.iter().enumerate() {
@@ -1468,6 +2054,7 @@ impl SpatialGraphEngine {
         matches.sort_by(|lhs, rhs| {
             rhs.score
                 .cmp(&lhs.score)
+                .then_with(|| lhs.vertex.is_seed.cmp(&rhs.vertex.is_seed))
                 .then_with(|| rhs.vertex.visit_count.cmp(&lhs.vertex.visit_count))
                 .then_with(|| rhs.vertex.last_seen_at.cmp(&lhs.vertex.last_seen_at))
                 .then_with(|| lhs.vertex.layout_hash.cmp(&rhs.vertex.layout_hash))

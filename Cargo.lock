@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "droidpath-core"
-version = "2.1.1"
+version = "2.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "droidpath-desktop"
-version = "2.1.1"
+version = "2.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "droidpath-mcp"
-version = "2.1.1"
+version = "2.2.0"
 dependencies = [
  "droidpath-core",
  "serde_json",

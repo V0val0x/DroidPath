@@ -447,6 +447,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 5,
             discovery_parent_hash: None,
             discovery_depth: 0,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
         ScreenStateVertex {
             layout_hash: shortcut_hub,
@@ -458,6 +460,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 1,
             discovery_parent_hash: Some(root_hash),
             discovery_depth: 1,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
         ScreenStateVertex {
             layout_hash: settings,
@@ -469,6 +473,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 4,
             discovery_parent_hash: Some(root_hash),
             discovery_depth: 1,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
         ScreenStateVertex {
             layout_hash: display,
@@ -480,6 +486,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 3,
             discovery_parent_hash: Some(settings),
             discovery_depth: 2,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
         ScreenStateVertex {
             layout_hash: timeout_screen,
@@ -491,6 +499,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 2,
             discovery_parent_hash: Some(shortcut_hub),
             discovery_depth: 2,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
         ScreenStateVertex {
             layout_hash: implicit_leaf,
@@ -502,6 +512,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 1,
             discovery_parent_hash: Some(root_hash),
             discovery_depth: 1,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
         ScreenStateVertex {
             layout_hash: post_implicit,
@@ -513,6 +525,8 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
             visit_count: 1,
             discovery_parent_hash: Some(implicit_leaf),
             discovery_depth: 2,
+            is_seed: false,
+            semantic_aliases: Vec::new(),
         },
     ];
 
@@ -531,6 +545,7 @@ async fn test_spatial_graph_compaction_exact_threshold_and_spanning_dag_rebuild(
         is_hazardous: false,
         hazard_reason: None,
         consecutive_failures: 0,
+        is_seed: false,
     };
 
     let edges = vec![

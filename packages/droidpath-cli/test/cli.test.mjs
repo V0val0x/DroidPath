@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const __testDir = path.dirname(fileURLToPath(import.meta.url));
 
 import {
   bundledDaemonJarPath,
@@ -13,7 +21,12 @@ import {
   sha256File,
   validateSerial,
 } from "../src/adb.mjs";
-import { releaseAssetName } from "../src/binary-resolver.mjs";
+import {
+  downloadNativeBinary,
+  parseChecksumsManifest,
+  releaseAssetName,
+  verifySha256Buffer,
+} from "../src/binary-resolver.mjs";
 import { parseCliArgs, runCli, expandClients } from "../src/index.mjs";
 import {
   RULES_END_MARKER,
@@ -227,12 +240,12 @@ test("runCli --version, --help, and doctor --json succeed cleanly", async () => 
   const io = { out: (s) => lines.push(s), err: () => {} };
 
   assert.equal(await runCli(["--version"], io), 0);
-  assert.match(lines[0], /droidpath 2\.1\.1/);
+  assert.match(lines[0], /droidpath 2\.2\.0/);
 
   lines.length = 0;
   assert.equal(await runCli(["doctor", "--json"], io), 0);
   const report = JSON.parse(lines.join("\n"));
-  assert.equal(report.cliVersion, "2.1.1");
+  assert.equal(report.cliVersion, "2.2.0");
   assert.equal(report.daemonJar.found, true);
 });
 
@@ -454,4 +467,634 @@ test("CLI rules command, --format exports, and init --no-rules flag work cleanly
 
   rmSync(tmpDir, { recursive: true, force: true });
   rmSync(tmpDir2, { recursive: true, force: true });
+});
+
+test("parseChecksumsManifest and verifySha256Buffer handle GNU/BSD formats, spaces, and tamper rejection", () => {
+  const payload = Buffer.from("#!/bin/sh\necho droidpath-ok\n");
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const manifest = [
+    "# comment line",
+    `${digest.toUpperCase()}  droidpath-mcp-aarch64-apple-darwin`,
+    `${digest} *./DroidPath Desktop 2.1.1.dmg`,
+    `not-a-valid-line`,
+    "",
+  ].join("\r\n");
+
+  const parsed = parseChecksumsManifest(manifest);
+  assert.equal(parsed.get("droidpath-mcp-aarch64-apple-darwin"), digest);
+  assert.equal(parsed.get("DroidPath Desktop 2.1.1.dmg"), digest);
+
+  assert.equal(verifySha256Buffer(payload, digest.toUpperCase(), "droidpath-mcp"), digest);
+  assert.throws(
+    () => verifySha256Buffer(Buffer.from("tampered"), digest, "droidpath-mcp"),
+    /SHA-256 verification failed/
+  );
+  assert.throws(
+    () => verifySha256Buffer(payload, "short", "droidpath-mcp"),
+    /Invalid expected SHA-256/
+  );
+});
+
+test("downloadNativeBinary enforces fail-closed SHA-256 verification, redirect pinning, atomic install, and opt-in bypass", async () => {
+  const goodPayload = Buffer.from("#!/bin/sh\necho verified-binary\n");
+  const goodHash = createHash("sha256").update(goodPayload).digest("hex");
+  const tamperedPayload = Buffer.from("#!/bin/sh\necho evil-binary\n");
+  const asset = "droidpath-mcp-aarch64-apple-darwin";
+  const requestedUrls = [];
+
+  const server = http.createServer((req, res) => {
+    requestedUrls.push(req.url);
+    // Simulate GitHub /releases/latest/download/ -> /releases/download/v2.1.1/ redirect pinning
+    if (req.url === "/latest/checksums.txt") {
+      res.writeHead(302, { Location: "/v2.1.1/checksums.txt" });
+      res.end();
+      return;
+    }
+    if (req.url === "/v2.1.1/checksums.txt") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`${goodHash}  ${asset}\n`);
+      return;
+    }
+    if (req.url === `/v2.1.1/${asset}`) {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(goodPayload);
+      return;
+    }
+    if (req.url === "/tampered/checksums.txt") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`${goodHash}  ${asset}\n`);
+      return;
+    }
+    if (req.url === `/tampered/${asset}`) {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(tamperedPayload);
+      return;
+    }
+    if (req.url === "/missing-entry/checksums.txt") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`${goodHash}  some-other-asset\n`);
+      return;
+    }
+    if (req.url === `/no-manifest/${asset}`) {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(goodPayload);
+      return;
+    }
+    res.writeHead(404);
+    res.end("Not Found");
+  });
+
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const origin = `http://127.0.0.1:${port}`;
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-sha-dl-"));
+
+  try {
+    // 1. Valid download via /latest redirect pins binary request to /v2.1.1/<asset>
+    const dest = await downloadNativeBinary({
+      baseUrl: `${origin}/latest`,
+      destDir: path.join(tmpDir, "ok"),
+      platform: "darwin",
+      arch: "arm64",
+    });
+    assert.equal(existsSync(dest), true);
+    assert.deepEqual(readFileSync(dest), goodPayload);
+    assert.ok(
+      requestedUrls.includes(`/v2.1.1/${asset}`),
+      `Expected redirect-pinned fetch to /v2.1.1/${asset}, got ${JSON.stringify(requestedUrls)}`
+    );
+
+    // 2. Tampered binary MUST fail closed and MUST NOT write destination file
+    const tamperedDir = path.join(tmpDir, "tampered");
+    await assert.rejects(
+      () =>
+        downloadNativeBinary({
+          baseUrl: `${origin}/tampered`,
+          destDir: tamperedDir,
+          platform: "darwin",
+          arch: "arm64",
+        }),
+      /SHA-256 verification failed/
+    );
+    assert.equal(existsSync(path.join(tamperedDir, "droidpath-mcp")), false);
+
+    // 3. Missing checksums.txt MUST fail closed by default
+    await assert.rejects(
+      () =>
+        downloadNativeBinary({
+          baseUrl: `${origin}/no-manifest`,
+          destDir: path.join(tmpDir, "no-manifest"),
+          platform: "darwin",
+          arch: "arm64",
+        }),
+      /Failed to fetch SHA-256 checksums\.txt/
+    );
+
+    // 4. Missing asset entry in checksums.txt MUST fail closed
+    await assert.rejects(
+      () =>
+        downloadNativeBinary({
+          baseUrl: `${origin}/missing-entry`,
+          destDir: path.join(tmpDir, "missing-entry"),
+          platform: "darwin",
+          arch: "arm64",
+        }),
+      /missing from checksums\.txt/
+    );
+
+    // 5. Explicit opt-in allowUnverified succeeds even without checksums.txt
+    const unverifiedDest = await downloadNativeBinary({
+      baseUrl: `${origin}/no-manifest`,
+      destDir: path.join(tmpDir, "unverified"),
+      platform: "darwin",
+      arch: "arm64",
+      allowUnverified: true,
+    });
+    assert.equal(existsSync(unverifiedDest), true);
+    assert.deepEqual(readFileSync(unverifiedDest), goodPayload);
+
+    // 6. CLI flag parser accepts --allow-unverified
+    const parsed = parseCliArgs(["mcp", "--allow-unverified"]);
+    assert.equal(parsed.flags.allowUnverified, true);
+  } finally {
+    server.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("downloadNativeBinary and install.sh handle 2-hop GitHub -> external S3 CDN redirects and Windows ARM64 fallback", async () => {
+  const asset = releaseAssetName(process.platform, process.arch) || "droidpath-mcp-aarch64-apple-darwin";
+  const winX64Asset = "droidpath-mcp-x86_64-pc-windows-msvc.exe";
+  const jarAsset = "android-daemon.jar";
+  const goodBin = Buffer.from("#!/bin/sh\necho github-cdn-ok\n");
+  const goodWinX64 = Buffer.from("MZ-fake-win-x64-binary");
+  const goodJar = Buffer.from("PK\x03\x04cdn-jar-ok");
+  const binSha = createHash("sha256").update(goodBin).digest("hex");
+  const winX64Sha = createHash("sha256").update(goodWinX64).digest("hex");
+  const jarSha = createHash("sha256").update(goodJar).digest("hex");
+  const manifestBody = `${binSha}  ${asset}\n${winX64Sha}  ${winX64Asset}\n${jarSha}  ${jarAsset}\n`;
+
+  const githubReqs = [];
+  const cdnReqs = [];
+
+  // Second server simulates external signed CDN host (release-assets.githubusercontent.com)
+  const cdnServer = http.createServer((req, res) => {
+    cdnReqs.push(req.url);
+    if (req.url === "/github-production-release-asset/999/uuid-checksums?sp=r&sig=abc") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(manifestBody);
+      return;
+    }
+    if (req.url === "/github-production-release-asset/999/uuid-bin?sp=r&sig=def") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(goodBin);
+      return;
+    }
+    if (req.url === "/github-production-release-asset/999/uuid-win64?sp=r&sig=ghi") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(goodWinX64);
+      return;
+    }
+    if (req.url === "/github-production-release-asset/999/uuid-jar?sp=r&sig=jkl") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(goodJar);
+      return;
+    }
+    // Any unsigned request directly to CDN must return 403 just like real Azure/S3 CDN
+    res.writeHead(403);
+    res.end("Forbidden unsigned CDN path");
+  });
+
+  await new Promise((r) => cdnServer.listen(0, "127.0.0.1", r));
+  const cdnOrigin = `http://127.0.0.1:${cdnServer.address().port}`;
+
+  // First server simulates github.com 2-hop redirects (/releases/latest/download -> /releases/download/v2.1.2 -> external CDN)
+  const githubServer = http.createServer((req, res) => {
+    githubReqs.push(req.url);
+    if (req.url === "/releases/latest/download/checksums.txt") {
+      res.writeHead(302, { Location: "/releases/download/v2.1.2/checksums.txt" });
+      res.end();
+      return;
+    }
+    if (req.url === "/releases/download/v2.1.2/checksums.txt") {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-checksums?sp=r&sig=abc`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === `/releases/download/v2.1.2/${asset}`) {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-bin?sp=r&sig=def`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === `/releases/download/v2.1.2/${winX64Asset}`) {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-win64?sp=r&sig=ghi`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === `/releases/download/v2.1.2/${jarAsset}`) {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-jar?sp=r&sig=jkl`,
+      });
+      res.end();
+      return;
+    }
+    res.writeHead(404);
+    res.end("Not Found");
+  });
+
+  await new Promise((r) => githubServer.listen(0, "127.0.0.1", r));
+  const githubOrigin = `http://127.0.0.1:${githubServer.address().port}`;
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-cdn-redirect-"));
+
+  try {
+    // 1. Node downloadNativeBinary follows 2-hop redirect to external CDN and STILL pins binary URL to /releases/download/v2.1.2/<asset>
+    const dest = await downloadNativeBinary({
+      baseUrl: `${githubOrigin}/releases/latest/download`,
+      destDir: path.join(tmpDir, "node-ok"),
+      platform: process.platform,
+      arch: process.arch,
+    });
+    assert.deepEqual(readFileSync(dest), goodBin);
+    assert.ok(
+      githubReqs.includes(`/releases/download/v2.1.2/${asset}`),
+      `Expected pinned v2.1.2 request on github host, got ${JSON.stringify(githubReqs)}`
+    );
+    assert.ok(
+      !cdnReqs.some((u) => u.includes(asset)),
+      `Must NEVER request binary directly from CDN base URL, got ${JSON.stringify(cdnReqs)}`
+    );
+
+    // 2. Windows ARM64 fallback to x64 when ARM64 asset is absent from checksums.txt (verified fail-closed!)
+    const winDest = await downloadNativeBinary({
+      baseUrl: `${githubOrigin}/releases/latest/download`,
+      destDir: path.join(tmpDir, "win-arm64-fallback"),
+      platform: "win32",
+      arch: "arm64",
+    });
+    assert.deepEqual(readFileSync(winDest), goodWinX64);
+    assert.ok(githubReqs.includes(`/releases/download/v2.1.2/${winX64Asset}`));
+
+    // 3. Unix scripts/install.sh also pins /releases/download/v2.1.2 across the 2-hop CDN redirect
+    const scriptPath = path.resolve(__testDir, "../../../scripts/install.sh");
+    if (process.platform !== "win32" && existsSync(scriptPath)) {
+      githubReqs.length = 0;
+      const shHome = path.join(tmpDir, "sh-cdn-ok");
+      const shRes = await execFileAsync("bash", [scriptPath], {
+        env: {
+          ...process.env,
+          DROIDPATH_HOME: shHome,
+          DROIDPATH_RELEASE_BASE_URL: `${githubOrigin}/releases/latest/download`,
+        },
+      });
+      assert.match(shRes.stdout, /Verified SHA-256/);
+      assert.deepEqual(readFileSync(path.join(shHome, "bin", "droidpath-mcp")), goodBin);
+      assert.deepEqual(readFileSync(path.join(shHome, "share", "android-daemon.jar")), goodJar);
+      assert.ok(
+        githubReqs.includes(`/releases/download/v2.1.2/${asset}`),
+        `install.sh must pin tag v2.1.2 across 2-hop CDN redirect, got ${JSON.stringify(githubReqs)}`
+      );
+      assert.ok(
+        githubReqs.includes(`/releases/download/v2.1.2/${jarAsset}`),
+        `install.sh must pin jar tag v2.1.2 across 2-hop CDN redirect, got ${JSON.stringify(githubReqs)}`
+      );
+    }
+  } finally {
+    githubServer.close();
+    cdnServer.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("scripts/install.sh verifies SHA-256 checksums.txt fail-closed on Unix", async (t) => {
+  const scriptPath = path.resolve(__testDir, "../../../scripts/install.sh");
+  if (process.platform === "win32" || !existsSync(scriptPath)) {
+    t.skip("Unix monorepo install.sh not available on this host");
+    return;
+  }
+
+  const mcpAsset = releaseAssetName(process.platform, process.arch);
+  if (!mcpAsset) {
+    t.skip(`Unsupported platform/arch: ${process.platform}/${process.arch}`);
+    return;
+  }
+
+  const jarAsset = "android-daemon.jar";
+  const goodMcp = Buffer.from("#!/bin/sh\necho droidpath-mcp-ok\n");
+  const goodJar = Buffer.from("PK\x03\x04droidpath-jar-ok");
+  const badMcp = Buffer.from("#!/bin/sh\necho evil\n");
+  const mcpSha = createHash("sha256").update(goodMcp).digest("hex");
+  const jarSha = createHash("sha256").update(goodJar).digest("hex");
+
+  const server = http.createServer((req, res) => {
+    if (req.url === "/latest/checksums.txt") {
+      res.writeHead(302, { Location: "/v2.1.1/checksums.txt" });
+      res.end();
+      return;
+    }
+    if (req.url === "/v2.1.1/checksums.txt") {
+      res.writeHead(200);
+      res.end(`${mcpSha}  ${mcpAsset}\n${jarSha}  ${jarAsset}\n`);
+      return;
+    }
+    if (req.url === `/v2.1.1/${mcpAsset}`) {
+      res.writeHead(200);
+      res.end(goodMcp);
+      return;
+    }
+    if (req.url === `/v2.1.1/${jarAsset}`) {
+      res.writeHead(200);
+      res.end(goodJar);
+      return;
+    }
+    if (req.url === "/tampered/checksums.txt") {
+      res.writeHead(200);
+      res.end(`${mcpSha}  ${mcpAsset}\n${jarSha}  ${jarAsset}\n`);
+      return;
+    }
+    if (req.url === `/tampered/${mcpAsset}`) {
+      res.writeHead(200);
+      res.end(badMcp);
+      return;
+    }
+    if (req.url === `/tampered/${jarAsset}`) {
+      res.writeHead(200);
+      res.end(goodJar);
+      return;
+    }
+    res.writeHead(404);
+    res.end("not found");
+  });
+
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-install-sh-"));
+
+  try {
+    const okHome = path.join(tmpDir, "ok");
+    const okRes = await execFileAsync("bash", [scriptPath, "--configure-mcp", "all"], {
+      env: {
+        ...process.env,
+        HOME: okHome,
+        DROIDPATH_HOME: path.join(okHome, ".droidpath"),
+        DROIDPATH_RELEASE_BASE_URL: `${base}/latest`,
+      },
+    });
+    assert.match(okRes.stdout, /Verified SHA-256/);
+    assert.deepEqual(readFileSync(path.join(okHome, ".droidpath", "bin", "droidpath-mcp")), goodMcp);
+    assert.deepEqual(readFileSync(path.join(okHome, ".droidpath", "share", "android-daemon.jar")), goodJar);
+
+    // Verify --configure-mcp all wrote Cursor, Claude Desktop, Gemini CLI, and Antigravity configs
+    const expectedClaudePath =
+      process.platform === "darwin"
+        ? path.join(okHome, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+        : path.join(okHome, ".config", "Claude", "claude_desktop_config.json");
+    for (const cfgPath of [
+      path.join(okHome, ".cursor", "mcp.json"),
+      expectedClaudePath,
+      path.join(okHome, ".gemini", "settings.json"),
+      path.join(okHome, ".gemini", "antigravity", "mcp_config.json"),
+    ]) {
+      assert.equal(existsSync(cfgPath), true, `Expected MCP config at ${cfgPath}`);
+      const parsed = JSON.parse(readFileSync(cfgPath, "utf8"));
+      assert.equal(
+        parsed.mcpServers.droidpath.command,
+        path.join(okHome, ".droidpath", "bin", "droidpath-mcp")
+      );
+      assert.ok(parsed.mcpServers.droidpath.args.includes("--stdio"));
+    }
+
+    // Verify targeted --configure-mcp gemini & antigravity work independently
+    const geminiOnlyHome = path.join(tmpDir, "gemini-only");
+    await execFileAsync("bash", [scriptPath, "--configure-mcp", "gemini"], {
+      env: {
+        ...process.env,
+        HOME: geminiOnlyHome,
+        DROIDPATH_HOME: path.join(geminiOnlyHome, ".droidpath"),
+        DROIDPATH_RELEASE_BASE_URL: `${base}/latest`,
+      },
+    });
+    assert.equal(existsSync(path.join(geminiOnlyHome, ".gemini", "settings.json")), true);
+    assert.equal(existsSync(path.join(geminiOnlyHome, ".cursor", "mcp.json")), false);
+
+    const tamHome = path.join(tmpDir, "tampered");
+    await assert.rejects(
+      () =>
+        execFileAsync("bash", [scriptPath], {
+          env: {
+            ...process.env,
+            HOME: tamHome,
+            DROIDPATH_HOME: tamHome,
+            DROIDPATH_RELEASE_BASE_URL: `${base}/tampered`,
+          },
+        }),
+      (err) => String(err.stderr).includes("SHA-256 mismatch")
+    );
+    assert.equal(existsSync(path.join(tamHome, "bin", "droidpath-mcp")), false);
+  } finally {
+    server.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("scripts/install.ps1 verifies 2-hop GitHub -> external S3 CDN redirects, application/octet-stream checksums.txt, MCP configs, and tamper rejection on Windows", async (t) => {
+  const scriptPath = path.resolve(__testDir, "../../../scripts/install.ps1");
+  if (process.platform !== "win32" || !existsSync(scriptPath)) {
+    t.skip("Windows PowerShell install.ps1 test runs on win32 hosts");
+    return;
+  }
+
+  const winAsset = releaseAssetName("win32", process.arch) || "droidpath-mcp-x86_64-pc-windows-msvc.exe";
+  const jarAsset = "android-daemon.jar";
+  const goodMcp = Buffer.from("MZ-droidpath-mcp-win-verified-ok");
+  const goodJar = Buffer.from("PK\x03\x04droidpath-jar-win-ok");
+  const badMcp = Buffer.from("MZ-tampered-evil-payload");
+  const mcpSha = createHash("sha256").update(goodMcp).digest("hex");
+  const jarSha = createHash("sha256").update(goodJar).digest("hex");
+  const manifestBody = `${mcpSha}  ${winAsset}\n${jarSha}  ${jarAsset}\n`;
+
+  const githubReqs = [];
+  const cdnReqs = [];
+
+  // External signed CDN mock serving application/octet-stream (exact GitHub S3 CDN behavior)
+  const cdnServer = http.createServer((req, res) => {
+    cdnReqs.push(`${req.method} ${req.url}`);
+    if (req.url === "/github-production-release-asset/999/uuid-checksums?sp=r&sig=abc") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(req.method === "HEAD" ? undefined : manifestBody);
+      return;
+    }
+    if (req.url === "/github-production-release-asset/999/uuid-win-bin?sp=r&sig=def") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(req.method === "HEAD" ? undefined : goodMcp);
+      return;
+    }
+    if (req.url === "/github-production-release-asset/999/uuid-jar?sp=r&sig=jkl") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(req.method === "HEAD" ? undefined : goodJar);
+      return;
+    }
+    res.writeHead(403);
+    res.end("Forbidden unsigned CDN path");
+  });
+
+  await new Promise((r) => cdnServer.listen(0, "127.0.0.1", r));
+  const cdnOrigin = `http://127.0.0.1:${cdnServer.address().port}`;
+
+  // GitHub mock performing 2-hop redirect: /releases/latest/download -> /releases/download/v2.2.0 -> external CDN
+  const githubServer = http.createServer((req, res) => {
+    githubReqs.push(`${req.method} ${req.url}`);
+    if (req.url === "/releases/latest/download/checksums.txt") {
+      res.writeHead(302, { Location: "/releases/download/v2.2.0/checksums.txt" });
+      res.end();
+      return;
+    }
+    if (req.url === "/releases/download/v2.2.0/checksums.txt") {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-checksums?sp=r&sig=abc`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === `/releases/download/v2.2.0/${winAsset}`) {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-win-bin?sp=r&sig=def`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === `/releases/download/v2.2.0/${jarAsset}`) {
+      res.writeHead(302, {
+        Location: `${cdnOrigin}/github-production-release-asset/999/uuid-jar?sp=r&sig=jkl`,
+      });
+      res.end();
+      return;
+    }
+    // Tampered artifact endpoint (fail-closed rejection test)
+    if (req.url === "/tampered/checksums.txt") {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(req.method === "HEAD" ? undefined : manifestBody);
+      return;
+    }
+    if (req.url === `/tampered/${winAsset}`) {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(req.method === "HEAD" ? undefined : badMcp);
+      return;
+    }
+    if (req.url === `/tampered/${jarAsset}`) {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end(req.method === "HEAD" ? undefined : goodJar);
+      return;
+    }
+    res.writeHead(404);
+    res.end("Not Found");
+  });
+
+  await new Promise((r) => githubServer.listen(0, "127.0.0.1", r));
+  const githubOrigin = `http://127.0.0.1:${githubServer.address().port}`;
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-install-ps1-"));
+
+  try {
+    // 1. Valid 2-hop CDN install + -ConfigureMcp all
+    const okProfile = path.join(tmpDir, "ok-profile");
+    const okAppData = path.join(okProfile, "AppData", "Roaming");
+    const okDroidPathHome = path.join(okProfile, ".droidpath");
+
+    const okRes = await execFileAsync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        scriptPath,
+        "-ReleaseBaseUrl",
+        `${githubOrigin}/releases/latest/download`,
+        "-ConfigureMcp",
+        "all",
+      ],
+      {
+        env: {
+          ...process.env,
+          USERPROFILE: okProfile,
+          APPDATA: okAppData,
+          DROIDPATH_HOME: okDroidPathHome,
+          DROIDPATH_SKIP_PATH_UPDATE: "1",
+        },
+      }
+    );
+
+    assert.match(okRes.stdout, /Verified SHA-256/);
+    assert.deepEqual(readFileSync(path.join(okDroidPathHome, "bin", "droidpath-mcp.exe")), goodMcp);
+    assert.deepEqual(readFileSync(path.join(okDroidPathHome, "share", "android-daemon.jar")), goodJar);
+
+    // Verify 2-hop redirect pinning hit /releases/download/v2.2.0/<asset> on githubServer and NEVER unsigned CDN
+    assert.ok(
+      githubReqs.includes(`GET /releases/download/v2.2.0/${winAsset}`),
+      `install.ps1 must pin tag v2.2.0 across 2-hop CDN redirect, got ${JSON.stringify(githubReqs)}`
+    );
+    assert.ok(
+      githubReqs.includes(`GET /releases/download/v2.2.0/${jarAsset}`),
+      `install.ps1 must pin jar tag v2.2.0 across 2-hop CDN redirect, got ${JSON.stringify(githubReqs)}`
+    );
+    assert.ok(
+      !cdnReqs.some((u) => u.includes(winAsset) || u.includes(jarAsset)),
+      `install.ps1 must NEVER request artifacts directly from CDN base URL, got ${JSON.stringify(cdnReqs)}`
+    );
+
+    // Verify -ConfigureMcp all wrote Cursor, Claude Desktop, Gemini CLI, and Antigravity JSON configs
+    for (const cfgPath of [
+      path.join(okProfile, ".cursor", "mcp.json"),
+      path.join(okAppData, "Claude", "claude_desktop_config.json"),
+      path.join(okProfile, ".gemini", "settings.json"),
+      path.join(okProfile, ".gemini", "antigravity", "mcp_config.json"),
+    ]) {
+      assert.equal(existsSync(cfgPath), true, `Expected Windows MCP config at ${cfgPath}`);
+      const parsed = JSON.parse(readFileSync(cfgPath, "utf8"));
+      assert.equal(
+        parsed.mcpServers.droidpath.command,
+        path.join(okDroidPathHome, "bin", "droidpath-mcp.exe")
+      );
+      assert.ok(parsed.mcpServers.droidpath.args.includes("--stdio"));
+    }
+
+    // 2. Tampered binary MUST fail closed and MUST NOT write droidpath-mcp.exe
+    const tamProfile = path.join(tmpDir, "tampered-profile");
+    const tamHome = path.join(tamProfile, ".droidpath");
+    await assert.rejects(
+      () =>
+        execFileAsync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            scriptPath,
+            "-ReleaseBaseUrl",
+            `${githubOrigin}/tampered`,
+          ],
+          {
+            env: {
+              ...process.env,
+              USERPROFILE: tamProfile,
+              APPDATA: path.join(tamProfile, "AppData", "Roaming"),
+              DROIDPATH_HOME: tamHome,
+              DROIDPATH_SKIP_PATH_UPDATE: "1",
+            },
+          }
+        ),
+      (err) => `${err.stderr || ""}${err.stdout || ""}`.includes("SHA-256 verification failed")
+    );
+    assert.equal(existsSync(path.join(tamHome, "bin", "droidpath-mcp.exe")), false);
+  } finally {
+    githubServer.close();
+    cdnServer.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

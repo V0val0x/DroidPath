@@ -1073,6 +1073,8 @@ async fn test_router_resilience_back_to_root_smart_scroll_and_edge_decay() {
         visit_count: 1,
         discovery_parent_hash: None,
         discovery_depth: 0,
+        is_seed: false,
+        semantic_aliases: Vec::new(),
     };
     let e_direct_failing = ScreenTransitionEdge {
         id: Uuid::new_v4(),
@@ -1087,6 +1089,7 @@ async fn test_router_resilience_back_to_root_smart_scroll_and_edge_decay() {
         is_hazardous: false,
         hazard_reason: None,
         consecutive_failures: 2, // cost *= 1.0 + 1.5 = 2.5x (~2.51) > 2-hop healthy path (~2.01)!
+        is_seed: false,
     };
     let e_hop1 = ScreenTransitionEdge {
         id: Uuid::new_v4(),
@@ -1101,6 +1104,7 @@ async fn test_router_resilience_back_to_root_smart_scroll_and_edge_decay() {
         is_hazardous: false,
         hazard_reason: None,
         consecutive_failures: 0,
+        is_seed: false,
     };
     let e_hop2 = ScreenTransitionEdge {
         id: Uuid::new_v4(),
@@ -1115,6 +1119,7 @@ async fn test_router_resilience_back_to_root_smart_scroll_and_edge_decay() {
         is_hazardous: false,
         hazard_reason: None,
         consecutive_failures: 0,
+        is_seed: false,
     };
     let snap = SpatialGraphSnapshot {
         root_state_hash: Some(1),

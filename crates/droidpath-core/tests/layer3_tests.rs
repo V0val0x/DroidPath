@@ -97,6 +97,8 @@ fn test_astar_pathfinder_optimal_routing_filtering_max_steps_and_heuristic_steer
         visit_count: 1,
         discovery_parent_hash: None,
         discovery_depth: 0,
+        is_seed: false,
+        semantic_aliases: Vec::new(),
     };
     let e = |from: u64, to: u64, label: Option<&str>, ms: f64, spanning: bool| {
         let action = label.map(|l| AttributedUIAction::tap(l, Some(100), Some(100)));
@@ -116,6 +118,7 @@ fn test_astar_pathfinder_optimal_routing_filtering_max_steps_and_heuristic_steer
             is_hazardous: false,
             hazard_reason: None,
             consecutive_failures: 0,
+            is_seed: false,
         }
     };
 

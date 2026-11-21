@@ -10,8 +10,8 @@ use crate::protocol::{ShadowUINode, WireSecureScreenPayload};
 use crate::shadow_dom::{BoundsRect, ShadowDOMUpdate, ShadowDomState, ShadowTreeIndex};
 use crate::spatial_graph::{
     AttributedUIAction, HazardCategory, HazardousActionClassifier, ScreenLayoutHasher,
-    ScreenSemanticFingerprint, ScreenStateVertex, ScreenTransitionEdge, SpatialGraphEngine,
-    UIActionKind,
+    ScreenSemanticFingerprint, ScreenStateVertex, ScreenTransitionEdge, SeedGraphCatalog,
+    SpatialGraphEngine, UIActionKind,
 };
 
 use super::executor::{
@@ -209,6 +209,10 @@ impl MacroExecutionEngine {
             }
 
             let edge = &path[step_index];
+            let step_from_fp = match self.dom_state.current_index().await {
+                Some(idx) => self.hasher.fingerprint(&idx),
+                None => initial_fp.clone(),
+            };
 
             // Pre-step settlement / forward-skip scan (#1)
             if let Some(live_index) = self.dom_state.current_index().await {
@@ -226,6 +230,16 @@ impl MacroExecutionEngine {
                     scan_ceiling,
                     self.configuration.settle_similarity_threshold,
                 ) {
+                    if expected_vertices[matched_jump_idx]
+                        .as_ref()
+                        .is_some_and(|v| v.is_seed)
+                    {
+                        let _ = self
+                            .graph_engine
+                            .hydrate_seed_vertex(path[matched_jump_idx].to_hash, &live_fp)
+                            .await;
+                        recovered_steps.push(format!("seed_hydrated:skip_{matched_jump_idx}"));
+                    }
                     last_settled_hash = live_fp.layout_hash;
                     if matched_jump_idx > step_index {
                         let detail = format!(
@@ -277,9 +291,10 @@ impl MacroExecutionEngine {
 
             let (mut resolved_action, mut matched_node) =
                 self.resolve_live_action_with_node(raw_action).await;
+            let mut did_smart_scroll = false;
 
             // Smart Scroll-to-Selector: if tap selector is off-screen inside a scrollable container,
-            // perform up to 2 search scrolls (down / reverse up at bottom) to reveal & lock onto the node.
+            // perform bounded search scrolls (down / reverse up at bottom) to reveal & lock onto the node.
             if self.configuration.enable_smart_scroll_to_selector
                 && matched_node.is_none()
                 && raw_action.kind == UIActionKind::Tap
@@ -290,6 +305,26 @@ impl MacroExecutionEngine {
                 {
                     resolved_action = scrolled_action;
                     matched_node = Some(scrolled_node);
+                    did_smart_scroll = true;
+                }
+            }
+
+            // When executing a coordinate-free Seed Graph tap, calibrate the action's semantic
+            // descriptor/selectors from the matched live node BEFORE recording pending action so
+            // live SpatialGraphEngine::process() and hydrate_seed_transition() share the exact same
+            // action_signature and never create duplicate edges.
+            if edge.is_seed {
+                if let Some(ref node) = matched_node {
+                    if !node.text.is_empty() {
+                        resolved_action.selector_text = Some(node.text.clone());
+                        resolved_action.target_description = node.text.clone();
+                    } else if !node.content_desc.is_empty() {
+                        resolved_action.selector_content_desc = Some(node.content_desc.clone());
+                        resolved_action.target_description = node.content_desc.clone();
+                    }
+                    if !node.resource_id.is_empty() {
+                        resolved_action.selector_resource_id = Some(node.resource_id.clone());
+                    }
                 }
             }
 
@@ -374,7 +409,6 @@ impl MacroExecutionEngine {
                 if updated_node.is_some() {
                     matched_node = updated_node;
                 }
-                let _ = matched_node;
             }
 
             // Suffix targets furthest-first for in-flight forward-skip settle (#1)
@@ -465,6 +499,55 @@ impl MacroExecutionEngine {
 
             let elapsed_ms = step_start.elapsed().as_millis() as u64;
             last_settled_hash = settled_hash;
+
+            // Seed-to-Real Hydration: promote traversed seed vertices & coordinate-free seed edges
+            // into real device-calibrated vertices and executable edges with exact coordinates/selectors.
+            let from_was_seed = graph_vertices
+                .get(&edge.from_hash)
+                .is_some_and(|v| v.is_seed);
+            let to_was_seed = expected_vertices[matched_idx]
+                .as_ref()
+                .is_some_and(|v| v.is_seed);
+            if edge.is_seed || from_was_seed || to_was_seed {
+                if let Some(live_settled_idx) = self.dom_state.current_index().await {
+                    let settled_fp = self.hasher.fingerprint(&live_settled_idx);
+                    let mut hydrated_action = resolved_action.clone();
+                    if let Some(ref node) = matched_node {
+                        if !node.text.is_empty() {
+                            hydrated_action.selector_text = Some(node.text.clone());
+                            hydrated_action.target_description = node.text.clone();
+                        } else if !node.content_desc.is_empty() {
+                            hydrated_action.selector_content_desc = Some(node.content_desc.clone());
+                            hydrated_action.target_description = node.content_desc.clone();
+                        }
+                        if !node.resource_id.is_empty() {
+                            hydrated_action.selector_resource_id = Some(node.resource_id.clone());
+                        }
+                        if did_smart_scroll {
+                            // Node was only revealed after scrolling away from `step_from_fp`;
+                            // keep the hydrated edge coordinate-free so future runs from the
+                            // un-scrolled top screen always re-scroll instead of clicking stale (x, y).
+                            hydrated_action.x = None;
+                            hydrated_action.y = None;
+                        } else {
+                            hydrated_action.x = Some(node.center_x);
+                            hydrated_action.y = Some(node.center_y);
+                        }
+                    }
+                    let _ = self
+                        .graph_engine
+                        .hydrate_seed_transition(
+                            edge.from_hash,
+                            path[matched_idx].to_hash,
+                            &step_from_fp,
+                            &settled_fp,
+                            hydrated_action,
+                            elapsed_ms as f64,
+                        )
+                        .await;
+                    recovered_steps.push(format!("seed_hydrated:step_{step_index}"));
+                }
+            }
 
             let primary_report = MacroStepReport {
                 step_index,
@@ -1100,16 +1183,28 @@ impl MacroExecutionEngine {
                 .selector_content_desc
                 .as_deref()
                 .map(str::trim)
-                .is_some_and(|s| !s.is_empty());
+                .is_some_and(|s| !s.is_empty())
+            || raw_action
+                .selector_aliases
+                .iter()
+                .any(|a| !a.trim().is_empty());
         if !has_selector {
             return Ok(None);
         }
 
-        // Phase 1: Scroll downward (up to 2 attempts, stopping early on bottom boundary).
+        // Coordinate-free semantic taps (e.g. "System" / "About phone" at the bottom of Android Settings)
+        // get 4 downward attempts; regular calibrated taps keep the bounded 2-attempt budget.
+        let down_budget = if raw_action.x.is_none() && raw_action.y.is_none() {
+            4usize
+        } else {
+            2usize
+        };
+
+        // Phase 1: Scroll downward (stopping early on bottom boundary).
         let mut down_moves = 0usize;
-        for attempt in 1..=2usize {
+        for attempt in 1..=down_budget {
             match self
-                .perform_smart_scroll_step(raw_action, serial, true, attempt, 2)
+                .perform_smart_scroll_step(raw_action, serial, true, attempt, down_budget)
                 .await?
             {
                 SmartScrollStepOutcome::Found(found) => {
@@ -1312,9 +1407,10 @@ impl MacroExecutionEngine {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
+        let has_aliases = action.selector_aliases.iter().any(|a| !a.trim().is_empty());
         let current_index = self.dom_state.current_index().await;
 
-        if rid.is_none() && text.is_none() && desc.is_none() {
+        if rid.is_none() && text.is_none() && desc.is_none() && !has_aliases {
             if let (Some(x), Some(y), Some(idx)) = (action.x, action.y, current_index.as_ref()) {
                 if let Some(live_node) = idx.resolve_node_at(x, y) {
                     return (action.clone(), Some(live_node.clone()));
@@ -1404,7 +1500,56 @@ impl MacroExecutionEngine {
                 }
             }
 
-            // 3. Unique resourceId fallback
+            // 3. Semantic selector_aliases fallback (cross-OEM / multilingual Seed Graph selectors)
+            if matched_node.is_none() && has_aliases {
+                let normalized_aliases: Vec<String> = action
+                    .selector_aliases
+                    .iter()
+                    .map(|a| a.trim().to_lowercase())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+
+                // Pass A: exact text / content_desc match across all aliases
+                for alias in &normalized_aliases {
+                    let exact_cands: Vec<&ShadowUINode> = visible_nodes
+                        .iter()
+                        .copied()
+                        .filter(|n| {
+                            n.text.trim().to_lowercase() == *alias
+                                || n.content_desc.trim().to_lowercase() == *alias
+                        })
+                        .collect();
+                    if !exact_cands.is_empty() {
+                        matched_node =
+                            Self::best_live_candidate(&exact_cands, Some(alias), Some(alias));
+                        break;
+                    }
+                }
+
+                // Pass B: prefix / substring match for multi-character aliases
+                if matched_node.is_none() {
+                    for alias in &normalized_aliases {
+                        if alias.chars().count() < 3 {
+                            continue;
+                        }
+                        let sub_cands: Vec<&ShadowUINode> = visible_nodes
+                            .iter()
+                            .copied()
+                            .filter(|n| {
+                                n.text.to_lowercase().contains(alias)
+                                    || n.content_desc.to_lowercase().contains(alias)
+                            })
+                            .collect();
+                        if !sub_cands.is_empty() {
+                            matched_node =
+                                Self::best_live_candidate(&sub_cands, Some(alias), Some(alias));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 4. Unique resourceId fallback
             if matched_node.is_none() {
                 if let Some(r) = rid {
                     let rid_cands: Vec<&ShadowUINode> = visible_nodes
@@ -1534,9 +1679,14 @@ impl MacroExecutionEngine {
         let Some(expected) = expected_vertex else {
             return (false, false);
         };
-        if expected.semantic_tokens.is_empty()
-            || fingerprint.active_package != expected.active_package
-        {
+        if fingerprint.active_package != expected.active_package {
+            return (false, false);
+        }
+        if expected.is_seed {
+            let seed_score = SeedGraphCatalog::seed_match_score(fingerprint, expected);
+            return (seed_score >= SeedGraphCatalog::SEED_MATCH_THRESHOLD, false);
+        }
+        if expected.semantic_tokens.is_empty() {
             return (false, false);
         }
         let sim =
