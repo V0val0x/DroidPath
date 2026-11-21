@@ -940,7 +940,8 @@ async fn tcp_client_drop_cleans_pending_waiter_and_wait_for_hello_enables_cold_s
     assert_eq!(client.pending_input_count(), 0);
     client.stop().await;
 
-    // 2. wait_for_hello on a closed loopback port fails fast instead of stalling for full timeout.
+    // 2. wait_for_hello on a closed loopback port fails fast on POSIX; on Windows Winsock delays
+    //    loopback WSAECONNREFUSED due to TCP SYN retransmission, so bound the timing assertion there.
     let closed_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
@@ -952,10 +953,37 @@ async fn tcp_client_drop_cleans_pending_waiter_and_wait_for_hello_enables_cold_s
     let t0 = Instant::now();
     let dead_hello = dead_client.wait_for_hello(Duration::from_millis(500)).await;
     assert!(!dead_hello, "wait_for_hello must return false on closed port");
+    #[cfg(not(windows))]
     assert!(
         t0.elapsed() < Duration::from_millis(350),
         "wait_for_hello should fail fast on ECONNREFUSED, took {:?}",
         t0.elapsed()
     );
+    #[cfg(windows)]
+    let _ = t0;
     dead_client.stop().await;
+
+    // 3. Immediate-EOF on an accepted loopback socket fails fast across all platforms (including Windows).
+    let eof_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind eof");
+    let eof_port = eof_listener.local_addr().unwrap().port();
+    let eof_accept = tokio::spawn(async move {
+        if let Ok((sock, _)) = eof_listener.accept().await {
+            drop(sock);
+        }
+    });
+
+    let eof_client = Arc::new(DaemonTcpClient::new(DaemonEndpointConfiguration::with_port(
+        eof_port,
+    )));
+    eof_client.start().await;
+    let t1 = Instant::now();
+    let eof_hello = eof_client.wait_for_hello(Duration::from_millis(500)).await;
+    assert!(!eof_hello, "wait_for_hello must return false on immediate EOF");
+    assert!(
+        t1.elapsed() < Duration::from_millis(350),
+        "wait_for_hello should fail fast on immediate EOF, took {:?}",
+        t1.elapsed()
+    );
+    eof_client.stop().await;
+    let _ = eof_accept.await;
 }
