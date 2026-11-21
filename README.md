@@ -74,12 +74,12 @@ flowchart LR
 
     Daemon <-->|"adb forward tcp:27189"| DOM
     Scrcpy <-->|"Loopback WS -> WebCodecs"| HUD
-    AStar -->|"adb shell input tap/swipe"| Sys
+    AStar -->|"TCP :27189 native input (ADB fallback)"| Daemon
     Daemon --- Sys
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM Daemon (`android-daemon/`):**
-   - Compiles into a standalone **650 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required.
+   - Compiles into a standalone **646 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required — and injects native `UiAutomation` `tap`/`swipe`/`keyevent` gestures directly over TCP `:27189` (with zero-fling 120Hz swipes and automatic `adb` fallback).
    - Enforces on-device **Privacy by Design**: binds its TCP socket strictly to `127.0.0.1` loopback (`adb forward`) and masks `isPassword` / sensitive editable fields to `"***"` before streaming over TCP `:27189`.
    - Streams full snapshots, compact NDJSON incremental diffs, foreground `TYPE_APPLICATION` window priority over `com.android.systemui` notifications, and `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` events on `FLAG_SECURE` or biometric prompts over TCP (`:27189`).
    - Deployed idempotently via SHA-256 verification and protected by automatic self-healing recovery.
@@ -97,17 +97,13 @@ flowchart LR
 
 ## Live Benchmark (Pixel 10a · `android_navigate_to_node`)
 
-Prompt: *"Navigate to Night Light"* from Launcher Home Screen:
+Prompt: *"Navigate to Show layout bounds"* (`Home > Settings > System > Developer Options > Show Layout Bounds`):
 
-| Metric | Traditional VLM Screenshot Loop | **DroidPath A\* Router** |
+| Metric | Traditional VLM Screenshot Loop | **DroidPath A\* + Native Daemon (`:27189`)** |
 | :--- | :---: | :---: |
-| **Intermediate LLM Roundtrips** | 4–5 vision inference calls | **0 calls** |
-| **Total End-to-End Latency** | ~12,000–25,000 ms | **1,683 ms** (4 hops) |
-| **State Feedback** | Full PNG screenshots (`screencap`) | Sub-ms Shadow DOM NDJSON frames |
-
-| Agentic HUD Execution |
-| :---: |
-| ![Layer 3 Agentic HUD](./assets/demo-layer3-agentic-hud.gif) |
+| **Intermediate LLM Roundtrips** | 7–9 vision inference calls (~15k tok) | **0 calls (0 vision tokens)** |
+| **Total End-to-End Latency** | ~30,000–40,000 ms (est.) | **2,003 ms** (7 hops · 1x live) |
+| **State & Input Path** | Full PNG screenshots (`screencap`) + stateless ADB | Sub-ms Shadow DOM NDJSON + native `UiAutomation` `:27189` |
 
 ## Comparison with Alternatives
 

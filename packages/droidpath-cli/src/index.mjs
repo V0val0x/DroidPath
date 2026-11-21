@@ -30,7 +30,7 @@ import {
   resolveClientRulesPaths,
 } from "./mcp-config.mjs";
 
-export const CLI_VERSION = "2.0.0";
+export const CLI_VERSION = "2.1.0";
 
 export function usageText() {
   return `droidpath v${CLI_VERSION} — Zero-Friction 1-Click Android Shadow DOM & MCP CLI
