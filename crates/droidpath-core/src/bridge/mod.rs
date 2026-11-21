@@ -18,7 +18,8 @@ use crate::router::{
 use crate::shadow_dom::{ShadowDOMUpdate, ShadowDomState, ShadowTreeIndex};
 use crate::spatial_graph::{
     AttributedUIAction, HazardCategory, HazardousActionClassifier, ScreenLayoutHasher,
-    ScreenSemanticFingerprint, ScreenStateVertex, SpatialGraphEngine, SpatialGraphSnapshot,
+    ScreenSemanticFingerprint, ScreenStateVertex, ScreenTransitionEdge, SeedGraphCatalog,
+    SpatialGraphEngine, SpatialGraphSnapshot,
 };
 use crate::transport::{
     BeforeReconnectHook, DaemonConnectionState, DaemonEndpointConfiguration, DaemonTcpClient,
@@ -656,6 +657,23 @@ impl ShadowGraphBridge {
                 }
             }
 
+            // Cross-package Zero-PII Seed Graph entry bridge:
+            // When starting outside `com.android.settings` (e.g. Home launcher on a brand-new phone)
+            // and routing to a seeded Android Settings screen, prepend a `LaunchApp("com.android.settings")`
+            // edge into the Settings root so cold-start navigation succeeds in 1 call and hydrates the graph.
+            if search_result.is_none()
+                && current_fp.active_package != SeedGraphCatalog::ANDROID_SETTINGS_PACKAGE
+                && opts.max_steps >= 1
+            {
+                search_result = Self::synthesize_settings_seed_entry_route(
+                    start_hash,
+                    &top_goals,
+                    &all_goals,
+                    &snapshot,
+                    opts.max_steps,
+                );
+            }
+
             // Universal Dismiss Auto-Recovery on no_route (#4)
             let Some(route) = search_result else {
                 if opts.enable_auto_recovery && recovery_attempt < max_recovery_attempts {
@@ -1038,6 +1056,34 @@ impl ShadowGraphBridge {
                         timeout_ms,
                     });
                 }
+                Err(PathDeviationError::ActionDispatchFailed {
+                    step_index,
+                    action_signature,
+                    underlying_message,
+                }) => {
+                    let failed_on_seed = step_index >= 0
+                        && route
+                            .edges
+                            .get(step_index as usize)
+                            .is_some_and(|e| e.is_seed);
+                    if failed_on_seed && opts.auto_explore {
+                        if let Some(target_str) = opts
+                            .target_hint
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            return self
+                                .fallback_to_auto_explore(target_str, serial, executor, &opts)
+                                .await;
+                        }
+                    }
+                    return Err(PathDeviationError::ActionDispatchFailed {
+                        step_index,
+                        action_signature,
+                        underlying_message,
+                    });
+                }
                 Err(other) => return Err(other),
             }
         }
@@ -1155,28 +1201,129 @@ impl ShadowGraphBridge {
         }
     }
 
+    fn synthesize_settings_seed_entry_route(
+        start_hash: u64,
+        top_goals: &HashSet<u64>,
+        all_goals: &HashSet<u64>,
+        snapshot: &SpatialGraphSnapshot,
+        max_steps: usize,
+    ) -> Option<crate::router::astar::AStarSearchResult> {
+        let has_settings_goal = snapshot.vertices.iter().any(|v| {
+            v.active_package == SeedGraphCatalog::ANDROID_SETTINGS_PACKAGE
+                && (top_goals.contains(&v.layout_hash) || all_goals.contains(&v.layout_hash))
+        });
+        if !has_settings_goal {
+            return None;
+        }
+        let settings_root = snapshot
+            .vertices
+            .iter()
+            .filter(|v| {
+                v.active_package == SeedGraphCatalog::ANDROID_SETTINGS_PACKAGE
+                    && ((v.is_seed && v.discovery_depth == 0)
+                        || v.semantic_aliases
+                            .iter()
+                            .any(|a| a.eq_ignore_ascii_case("com.android.settings")))
+            })
+            .min_by(|a, b| {
+                a.is_seed
+                    .cmp(&b.is_seed)
+                    .then_with(|| a.discovery_depth.cmp(&b.discovery_depth))
+                    .then_with(|| a.layout_hash.cmp(&b.layout_hash))
+            })?;
+
+        let remaining_steps = max_steps.saturating_sub(1);
+        let launch_action = AttributedUIAction::launch_app(SeedGraphCatalog::ANDROID_SETTINGS_PACKAGE);
+        let launch_sig = launch_action.signature();
+        let entry_edge = ScreenTransitionEdge {
+            id: uuid::Uuid::new_v4(),
+            from_hash: start_hash,
+            to_hash: settings_root.layout_hash,
+            action: Some(launch_action),
+            action_signature: launch_sig,
+            traversal_count: 0,
+            average_transition_ms: 450.0,
+            is_spanning_tree_edge: false,
+            last_traversed_at: chrono::Utc::now(),
+            is_hazardous: false,
+            hazard_reason: None,
+            consecutive_failures: 0,
+            is_seed: true,
+        };
+
+        if top_goals.contains(&settings_root.layout_hash) {
+            return Some(crate::router::astar::AStarSearchResult {
+                start_hash,
+                target_hash: settings_root.layout_hash,
+                edges: vec![entry_edge],
+                total_cost: 1.25,
+                expanded_node_count: 1,
+            });
+        }
+        if remaining_steps == 0 {
+            return None;
+        }
+
+        let inner_pf = AStarPathfinder::new(AStarCostConfiguration::with_max_steps(remaining_steps));
+        let inner_route = inner_pf
+            .find_shortest_path_to_any(settings_root.layout_hash, top_goals, snapshot)
+            .or_else(|| {
+                if all_goals != top_goals {
+                    inner_pf.find_shortest_path_to_any(
+                        settings_root.layout_hash,
+                        all_goals,
+                        snapshot,
+                    )
+                } else {
+                    None
+                }
+            })?;
+
+        let mut combined_edges = Vec::with_capacity(inner_route.edges.len() + 1);
+        combined_edges.push(entry_edge);
+        combined_edges.extend(inner_route.edges);
+        Some(crate::router::astar::AStarSearchResult {
+            start_hash,
+            target_hash: inner_route.target_hash,
+            edges: combined_edges,
+            total_cost: inner_route.total_cost + 1.25,
+            expanded_node_count: inner_route.expanded_node_count + 1,
+        })
+    }
+
     fn semantic_aliases(
         current_fp: &ScreenSemanticFingerprint,
         start_hash: u64,
         vertices: &[ScreenStateVertex],
         threshold: f64,
     ) -> Vec<(u64, f64)> {
-        let mut aliases: Vec<(u64, f64)> = vertices
+        let mut aliases: Vec<(u64, f64, bool)> = vertices
             .iter()
             .filter_map(|v| {
-                if v.layout_hash == start_hash
-                    || v.active_package != current_fp.active_package
-                    || v.semantic_tokens.is_empty()
-                {
+                if v.layout_hash == start_hash || v.active_package != current_fp.active_package {
+                    return None;
+                }
+                if v.is_seed {
+                    let seed_score = SeedGraphCatalog::seed_match_score(current_fp, v);
+                    return (seed_score >= SeedGraphCatalog::SEED_MATCH_THRESHOLD)
+                        .then_some((v.layout_hash, seed_score, true));
+                }
+                if v.semantic_tokens.is_empty() {
                     return None;
                 }
                 let sim =
                     ScreenLayoutHasher::jaccard_similarity(&current_fp.tokens, &v.semantic_tokens);
-                (sim >= threshold).then_some((v.layout_hash, sim))
+                (sim >= threshold).then_some((v.layout_hash, sim, false))
             })
             .collect();
-        aliases.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1).then_with(|| lhs.0.cmp(&rhs.0)));
-        aliases
+        // Prefer calibrated real semantic aliases ahead of unhydrated seed aliases; highest score first.
+        aliases.sort_by(|lhs, rhs| {
+            lhs.2
+                .cmp(&rhs.2)
+                .then_with(|| rhs.1.total_cmp(&lhs.1))
+                .then_with(|| lhs.0.cmp(&rhs.0))
+        });
+        aliases.into_iter().map(|(h, s, _)| (h, s)).collect()
     }
 
     fn matches_any_goal(
@@ -1191,8 +1338,18 @@ impl ShadowGraphBridge {
         for vertex in &snapshot.vertices {
             if !goals.contains(&vertex.layout_hash)
                 || vertex.active_package != fingerprint.active_package
-                || vertex.semantic_tokens.is_empty()
             {
+                continue;
+            }
+            if vertex.is_seed {
+                if SeedGraphCatalog::seed_match_score(fingerprint, vertex)
+                    >= SeedGraphCatalog::SEED_MATCH_THRESHOLD
+                {
+                    return true;
+                }
+                continue;
+            }
+            if vertex.semantic_tokens.is_empty() {
                 continue;
             }
             if ScreenLayoutHasher::jaccard_similarity(&fingerprint.tokens, &vertex.semantic_tokens)
@@ -1491,6 +1648,7 @@ impl ShadowGraphBridge {
             ]
             .into_iter()
             .flatten()
+            .chain(action.selector_aliases.iter().map(String::as_str))
             .any(|raw| {
                 let lower = raw.trim().to_lowercase();
                 !lower.is_empty() && (lower == q || lower.contains(&q))

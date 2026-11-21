@@ -399,7 +399,13 @@ impl AStarPathfinder {
         } else {
             0.03 / (edge.traversal_count.max(1) as f64)
         };
-        let base_cost = self.configuration.min_step_cost + latency_term + reliability_term;
+        let seed_penalty = if edge.is_seed {
+            0.25 * self.configuration.min_step_cost
+        } else {
+            0.0
+        };
+        let base_cost =
+            self.configuration.min_step_cost + latency_term + reliability_term + seed_penalty;
         let decay_multiplier = 1.0 + 0.75 * f64::from(edge.consecutive_failures.max(0));
         base_cost * decay_multiplier
     }

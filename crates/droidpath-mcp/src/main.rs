@@ -211,13 +211,14 @@ async fn main() -> ExitCode {
     }
 
     let adb = DroidPathAdbRunner::default();
-    let manager = DroidPathManager::new(
+    let manager = DroidPathManager::new_with_seed(
         cfg.daemon_port,
         cfg.graph_path.clone(),
         cfg.daemon_jar_path.clone(),
         adb.clone(),
         None,
         None,
+        true,
     );
 
     match cfg.mode {
@@ -283,6 +284,8 @@ async fn main() -> ExitCode {
             let stats = manager.graph_stats().await;
             let payload = json!({
                 "vertex_count": stats.vertex_count,
+                "seed_vertex_count": stats.seed_vertex_count,
+                "hydrated_vertex_count": stats.hydrated_vertex_count,
                 "edge_count": stats.edge_count,
                 "current_state_hash": stats.current_state_hash.map(|h| format!("0x{h:016x}")),
                 "current_package": stats.current_package,
@@ -329,6 +332,8 @@ async fn main() -> ExitCode {
                     "path": stats.storage_path,
                     "exists": cfg.graph_path.is_file(),
                     "vertex_count": stats.vertex_count,
+                    "seed_vertex_count": stats.seed_vertex_count,
+                    "hydrated_vertex_count": stats.hydrated_vertex_count,
                     "edge_count": stats.edge_count,
                 }
             });

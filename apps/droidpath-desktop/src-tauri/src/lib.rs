@@ -7,8 +7,8 @@ use droidpath_core::{
     AttributedUIAction, DroidPathAdbRunner, DroidPathDevice, DroidPathGraphStats,
     DroidPathHttpServer, DroidPathManager, DroidPathMcpServerCore,
     DroidPathPersistenceCoordinator, HazardousConfirmationRequest, MacroExecutionEvent,
-    ScrcpyBridge, ScrcpySessionInfo, ScrcpyStartConfig, ShadowCompactNode, ShadowNavigationOutcome,
-    SpatialGraphSnapshot,
+    ScrcpyBridge, ScrcpySessionInfo, ScrcpyStartConfig, ScreenLayoutHasher, ShadowCompactNode,
+    ShadowNavigationOutcome, SpatialGraphSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -29,6 +29,8 @@ pub(crate) struct PendingHitlNavigation {
 #[serde(rename_all = "camelCase")]
 pub struct DesktopGraphStatsDto {
     pub vertex_count: usize,
+    pub seed_vertex_count: usize,
+    pub hydrated_vertex_count: usize,
     pub edge_count: usize,
     pub current_state_hash_hex: Option<String>,
     pub current_package: String,
@@ -41,6 +43,8 @@ impl From<DroidPathGraphStats> for DesktopGraphStatsDto {
     fn from(s: DroidPathGraphStats) -> Self {
         Self {
             vertex_count: s.vertex_count,
+            seed_vertex_count: s.seed_vertex_count,
+            hydrated_vertex_count: s.hydrated_vertex_count,
             edge_count: s.edge_count,
             current_state_hash_hex: s.current_state_hash.map(|h| format!("0x{h:016x}")),
             current_package: s.current_package,
@@ -60,6 +64,7 @@ pub struct DesktopVertexDto {
     pub visit_count: i32,
     pub discovery_parent_hash_hex: Option<String>,
     pub discovery_depth: i32,
+    pub is_seed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +77,7 @@ pub struct DesktopEdgeDto {
     pub traversal_count: i32,
     pub is_hazardous: bool,
     pub hazard_reason: Option<String>,
+    pub is_seed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +106,7 @@ impl From<SpatialGraphSnapshot> for DesktopGraphSnapshotDto {
                         .discovery_parent_hash
                         .map(|h| format!("0x{h:016x}")),
                     discovery_depth: v.discovery_depth,
+                    is_seed: v.is_seed,
                 })
                 .collect(),
             edges: snap
@@ -113,6 +120,7 @@ impl From<SpatialGraphSnapshot> for DesktopGraphSnapshotDto {
                     traversal_count: e.traversal_count,
                     is_hazardous: e.is_hazardous,
                     hazard_reason: e.hazard_reason,
+                    is_seed: e.is_seed,
                 })
                 .collect(),
         }
@@ -339,12 +347,14 @@ async fn get_ui_tree(state: State<'_, Arc<AppState>>) -> Result<Vec<ShadowCompac
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn navigate_to_node(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     target: Option<String>,
     target_hash: Option<String>,
     confirmed: Option<bool>,
+    auto_explore: Option<bool>,
     max_steps: Option<usize>,
     step_timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
@@ -363,6 +373,7 @@ async fn navigate_to_node(
     let max_s = max_steps.unwrap_or(12).clamp(1, 30);
     let timeout_ms = step_timeout_ms.unwrap_or(2000).clamp(250, 10_000);
     let is_confirmed = confirmed.unwrap_or(false);
+    let allow_auto_explore = auto_explore.unwrap_or(true);
 
     if is_confirmed {
         *state.pending_hitl.lock().await = None;
@@ -377,7 +388,7 @@ async fn navigate_to_node(
             max_s,
             timeout_ms,
             is_confirmed,
-            false,
+            allow_auto_explore,
             60.0,
             None,
         )
@@ -515,13 +526,12 @@ async fn inject_touch(
     }
 
     if state.scrcpy.send_touch(action, 0, norm_x, norm_y).await.is_err() && action == 1 {
-        // Fallback: dispatch tap via ADB when scrcpy mirror isn't connected
+        // Fallback: dispatch tap via fast native daemon TCP (with automatic ADB fallback)
         if let Some(serial) = state.active_serial.lock().await.clone() {
-            let xs = dev_x.to_string();
-            let ys = dev_y.to_string();
             let _ = state
-                .adb
-                .execute(&["-s", &serial, "shell", "input", "tap", &xs, &ys], 4.0)
+                .manager
+                .action_executor()
+                .dispatch_tap(&serial, dev_x, dev_y)
                 .await;
         }
     }
@@ -646,8 +656,9 @@ async fn inject_keyevent(
     }
     if let Some(serial) = state.active_serial.lock().await.clone() {
         state
-            .adb
-            .execute(&["-s", &serial, "shell", "input", "keyevent", &resolved], 4.0)
+            .manager
+            .action_executor()
+            .dispatch_keyevent_code(&serial, &resolved)
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -665,6 +676,10 @@ async fn inject_text(
         return Ok(());
     }
     let enter = press_enter.unwrap_or(false);
+    let safe_preview: String = ScreenLayoutHasher::redact_pii(&text)
+        .chars()
+        .take(24)
+        .collect();
     state
         .manager
         .record_action(AttributedUIAction::type_text(text.clone(), enter))
@@ -673,7 +688,7 @@ async fn inject_text(
         "passive-learning",
         &PassiveLearningEvent {
             kind: "typeText".to_string(),
-            label: text.chars().take(24).collect(),
+            label: safe_preview,
             x: None,
             y: None,
             selector_text: None,
@@ -847,7 +862,15 @@ pub fn run() {
                 .ok()
                 .map(|dir| dir.join("android-daemon.jar"))
                 .filter(|p| p.is_file());
-            let manager = DroidPathManager::new(27189, storage, bundled_jar, adb.clone(), None, None);
+            let manager = DroidPathManager::new_with_seed(
+                27189,
+                storage,
+                bundled_jar,
+                adb.clone(),
+                None,
+                None,
+                true,
+            );
             let scrcpy = Arc::new(ScrcpyBridge::new(adb.clone()));
             let mcp_core = Arc::new(DroidPathMcpServerCore::new(Arc::clone(&manager)));
             let mcp_http = Arc::new(DroidPathHttpServer::new(mcp_core));
@@ -1000,6 +1023,8 @@ mod tests {
                 visit_count: 2,
                 discovery_parent_hash: None,
                 discovery_depth: 0,
+                is_seed: false,
+                semantic_aliases: Vec::new(),
             }],
             edges: vec![ScreenTransitionEdge {
                 id: uuid::Uuid::new_v4(),
@@ -1014,6 +1039,7 @@ mod tests {
                 is_hazardous: true,
                 hazard_reason: Some("payment".to_string()),
                 consecutive_failures: 0,
+                is_seed: false,
             }],
             spanning_children: BTreeMap::new(),
         };

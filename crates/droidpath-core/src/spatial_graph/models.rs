@@ -166,6 +166,8 @@ pub struct AttributedUIAction {
     pub selector_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector_content_desc: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selector_aliases: Vec<String>,
     #[serde(with = "swift_iso8601")]
     pub timestamp: DateTime<Utc>,
 }
@@ -185,6 +187,7 @@ impl AttributedUIAction {
             selector_resource_id: None,
             selector_text: None,
             selector_content_desc: None,
+            selector_aliases: Vec::new(),
             timestamp: Utc::now(),
         }
     }
@@ -210,6 +213,7 @@ impl AttributedUIAction {
             selector_resource_id: None,
             selector_text: None,
             selector_content_desc: None,
+            selector_aliases: Vec::new(),
             timestamp: Utc::now(),
         }
     }
@@ -228,6 +232,7 @@ impl AttributedUIAction {
             selector_resource_id: None,
             selector_text: None,
             selector_content_desc: None,
+            selector_aliases: Vec::new(),
             timestamp: Utc::now(),
         }
     }
@@ -248,6 +253,7 @@ impl AttributedUIAction {
             selector_resource_id: None,
             selector_text: None,
             selector_content_desc: None,
+            selector_aliases: Vec::new(),
             timestamp: Utc::now(),
         }
     }
@@ -266,6 +272,7 @@ impl AttributedUIAction {
             selector_resource_id: None,
             selector_text: None,
             selector_content_desc: None,
+            selector_aliases: Vec::new(),
             timestamp: Utc::now(),
         }
     }
@@ -305,6 +312,11 @@ impl AttributedUIAction {
                 .selector_content_desc
                 .as_deref()
                 .map(ScreenLayoutHasher::redact_pii),
+            selector_aliases: self
+                .selector_aliases
+                .iter()
+                .map(|a| ScreenLayoutHasher::redact_pii(a))
+                .collect(),
             timestamp: self.timestamp,
         }
     }
@@ -326,6 +338,10 @@ pub struct ScreenStateVertex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_parent_hash: Option<u64>,
     pub discovery_depth: i32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_seed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +365,8 @@ pub struct ScreenTransitionEdge {
     pub hazard_reason: Option<String>,
     #[serde(default)]
     pub consecutive_failures: i32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_seed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

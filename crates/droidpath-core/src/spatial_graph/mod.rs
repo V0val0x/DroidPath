@@ -2,6 +2,7 @@ pub mod engine;
 pub mod hasher;
 pub mod hazard;
 pub mod models;
+pub mod seed;
 
 pub use engine::{SpatialGraphEngine, TopologyChangedHandler};
 pub use hasher::{ScreenLayoutHasher, ScreenSemanticFingerprint};
@@ -10,3 +11,4 @@ pub use models::{
     AttributedUIAction, RankedVertexMatch, ScreenStateVertex, ScreenTransitionEdge,
     SpatialGraphSnapshot, UIActionKind,
 };
+pub use seed::{SeedGraphCatalog, SeedMergeReport};

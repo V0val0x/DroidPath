@@ -351,6 +351,7 @@ impl DroidPathMcpServerCore {
         arguments: &Map<String, Value>,
     ) -> Result<McpToolResult, String> {
         let get_str = |k: &str| arguments.get(k).and_then(Value::as_str);
+        let get_serial = || get_str("device_serial").or_else(|| get_str("serial"));
         let get_i32 = |k: &str| {
             arguments
                 .get(k)
@@ -364,6 +365,8 @@ impl DroidPathMcpServerCore {
                 let stats = self.manager.graph_stats().await;
                 let val = json!({
                     "vertex_count": stats.vertex_count,
+                    "seed_vertex_count": stats.seed_vertex_count,
+                    "hydrated_vertex_count": stats.hydrated_vertex_count,
                     "edge_count": stats.edge_count,
                     "current_state_hash": stats.current_state_hash.map(Self::hex),
                     "current_package": stats.current_package,
@@ -396,7 +399,7 @@ impl DroidPathMcpServerCore {
             "android_get_ui_tree" => {
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
@@ -438,7 +441,7 @@ impl DroidPathMcpServerCore {
 
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 let max_steps = get_i32("max_steps").unwrap_or(12).clamp(1, 30) as usize;
@@ -473,7 +476,7 @@ impl DroidPathMcpServerCore {
                 };
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 let max_scrolls = get_i32("max_scrolls").unwrap_or(3).clamp(0, 10) as usize;
@@ -504,7 +507,7 @@ impl DroidPathMcpServerCore {
             "android_tap_element" => {
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 if let (Some(x), Some(y)) = (get_i32("x"), get_i32("y")) {
@@ -632,7 +635,7 @@ impl DroidPathMcpServerCore {
                 let duration_opt = get_i32("duration_ms").map(|d| d.clamp(50, 5000));
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
@@ -685,7 +688,7 @@ impl DroidPathMcpServerCore {
                 let press_enter = get_bool("press_enter").unwrap_or(false);
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
@@ -731,7 +734,11 @@ impl DroidPathMcpServerCore {
             }
 
             "android_keyevent" => {
-                let Some(raw) = get_str("keycode").map(str::trim).filter(|s| !s.is_empty()) else {
+                let Some(raw) = get_str("keycode")
+                    .or_else(|| get_str("key"))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
                     return Ok(McpToolResult::text("Missing 'keycode' parameter.", true));
                 };
                 let Some(key_code) = DroidPathAdbRunner::resolve_key_code(raw) else {
@@ -742,7 +749,7 @@ impl DroidPathMcpServerCore {
                 };
                 let serial = self
                     .adb_runner
-                    .resolve_target_serial(get_str("device_serial"))
+                    .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;

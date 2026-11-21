@@ -549,6 +549,7 @@ async fn explore_and_macro_use_wide_fast_zero_fling_scroll_and_tight_quiescence(
             is_hazardous: false,
             hazard_reason: None,
             consecutive_failures: 0,
+            is_seed: false,
         },
         ScreenTransitionEdge {
             id: uuid::Uuid::new_v4(),
@@ -563,6 +564,7 @@ async fn explore_and_macro_use_wide_fast_zero_fling_scroll_and_tight_quiescence(
             is_hazardous: false,
             hazard_reason: None,
             consecutive_failures: 0,
+            is_seed: false,
         },
     ];
 
@@ -808,6 +810,7 @@ async fn intermediate_scroll_settles_on_one_row_shift_and_explore_drains_mid_swi
             is_hazardous: false,
             hazard_reason: None,
             consecutive_failures: 0,
+            is_seed: false,
         },
         ScreenTransitionEdge {
             id: uuid::Uuid::new_v4(),
@@ -822,6 +825,7 @@ async fn intermediate_scroll_settles_on_one_row_shift_and_explore_drains_mid_swi
             is_hazardous: false,
             hazard_reason: None,
             consecutive_failures: 0,
+            is_seed: false,
         },
     ];
 

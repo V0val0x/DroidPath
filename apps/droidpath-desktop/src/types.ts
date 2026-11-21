@@ -34,6 +34,8 @@ export interface DaemonConnectionState {
 
 export interface DroidPathGraphStats {
   vertexCount: number;
+  seedVertexCount?: number;
+  hydratedVertexCount?: number;
   edgeCount: number;
   currentStateHashHex: string | null;
   currentPackage: string;
@@ -142,6 +144,7 @@ export interface ScreenStateVertex {
   visitCount: number;
   discoveryParentHashHex?: string | null;
   discoveryDepth: number;
+  isSeed?: boolean;
 }
 
 export interface ScreenTransitionEdge {
@@ -152,6 +155,7 @@ export interface ScreenTransitionEdge {
   traversalCount: number;
   isHazardous: boolean;
   hazardReason?: string | null;
+  isSeed?: boolean;
 }
 
 export interface SpatialGraphSnapshot {

@@ -85,16 +85,28 @@ export function renderSpatialGraphSvg(
     line.setAttribute("y1", from.y.toFixed(1));
     line.setAttribute("x2", to.x.toFixed(1));
     line.setAttribute("y2", to.y.toFixed(1));
-    line.setAttribute("stroke", edge.isHazardous ? "#F59E0B" : "rgba(148,163,184,0.45)");
-    line.setAttribute("stroke-width", edge.isHazardous ? "1.8" : "1.3");
+    const isSeedEdge = Boolean(edge.isSeed);
+    line.setAttribute(
+      "stroke",
+      edge.isHazardous
+        ? "#F59E0B"
+        : isSeedEdge
+          ? "rgba(148,163,184,0.28)"
+          : "rgba(148,163,184,0.52)"
+    );
+    line.setAttribute("stroke-width", edge.isHazardous ? "1.8" : isSeedEdge ? "1.1" : "1.4");
     if (edge.isHazardous) {
       line.setAttribute("stroke-dasharray", "4 3");
+    } else if (isSeedEdge) {
+      line.setAttribute("stroke-dasharray", "3 3");
     }
     line.setAttribute("marker-end", edge.isHazardous ? "url(#dp-arrow-warn)" : "url(#dp-arrow)");
     const title = document.createElementNS(SVG_NS, "title");
     title.textContent = edge.isHazardous
       ? `⚠️ ${edge.actionSignature} (${edge.hazardReason ?? "hazardous"})`
-      : `${edge.actionSignature} (${edge.traversalCount}x)`;
+      : isSeedEdge
+        ? `${edge.actionSignature} (seed — hydrates on 1st traversal)`
+        : `${edge.actionSignature} (${edge.traversalCount}x)`;
     line.appendChild(title);
     svg.appendChild(line);
   }
@@ -122,23 +134,28 @@ export function renderSpatialGraphSvg(
       g.appendChild(glow);
     }
 
+    const isSeedNode = Boolean(v.isSeed);
     const circle = document.createElementNS(SVG_NS, "circle");
-    circle.setAttribute("r", isCurrent ? "10" : "8");
-    circle.setAttribute("fill", color);
-    circle.setAttribute("stroke", "#0B0D12");
-    circle.setAttribute("stroke-width", "2");
+    circle.setAttribute("r", isCurrent ? "10" : isSeedNode ? "6.5" : "8");
+    circle.setAttribute("fill", isSeedNode ? "rgba(56,189,248,0.22)" : color);
+    circle.setAttribute("stroke", isSeedNode ? color : "#0B0D12");
+    circle.setAttribute("stroke-width", isSeedNode ? "1.5" : "2");
+    if (isSeedNode) {
+      circle.setAttribute("stroke-dasharray", "3 2");
+    }
     g.appendChild(circle);
 
     const text = document.createElementNS(SVG_NS, "text");
     text.setAttribute("y", "21");
     text.setAttribute("text-anchor", "middle");
-    text.setAttribute("fill", "#CBD5E1");
+    text.setAttribute("fill", isSeedNode ? "#94A3B8" : "#CBD5E1");
     text.setAttribute("font-size", "9");
     text.textContent = vertexTitle(v);
     g.appendChild(text);
 
     const tooltip = document.createElementNS(SVG_NS, "title");
-    tooltip.textContent = `${v.activePackage}\nLabels: ${v.sampleInteractiveLabels.join(", ")}\nVisits: ${v.visitCount}\nClick to route here via A*`;
+    const seedTag = isSeedNode ? "\nStatus: Seed (auto-hydrates on 1st traversal)" : "";
+    tooltip.textContent = `${v.activePackage}${seedTag}\nLabels: ${v.sampleInteractiveLabels.join(", ")}\nVisits: ${v.visitCount}\nClick to route here via A*`;
     g.appendChild(tooltip);
 
     svg.appendChild(g);

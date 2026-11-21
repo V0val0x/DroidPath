@@ -30,7 +30,7 @@ import {
   resolveClientRulesPaths,
 } from "./mcp-config.mjs";
 
-export const CLI_VERSION = "2.1.1";
+export const CLI_VERSION = "2.2.0";
 
 export function usageText() {
   return `droidpath v${CLI_VERSION} — Zero-Friction 1-Click Android Shadow DOM & MCP CLI
@@ -66,6 +66,7 @@ OPTIONS:
   --configure           Also configure MCP clients during 'start'
   --deploy              Also deploy android-daemon during 'init'
   --no-auto-deploy      Skip automatic daemon deploy before starting 'mcp'
+  --allow-unverified    Skip SHA-256 checksums.txt verification when downloading binaries (unsafe)
   --dry-run             Preview config/rule changes without writing files
   --json                Machine-readable JSON output
   -v, --version         Print version
@@ -89,6 +90,7 @@ export function parseCliArgs(argv) {
     configure: false,
     deploy: false,
     noAutoDeploy: false,
+    allowUnverified: false,
     dryRun: false,
     json: false,
     help: false,
@@ -167,6 +169,9 @@ export function parseCliArgs(argv) {
         break;
       case "--no-auto-deploy":
         flags.noAutoDeploy = true;
+        break;
+      case "--allow-unverified":
+        flags.allowUnverified = true;
         break;
       case "--dry-run":
         flags.dryRun = true;
@@ -292,6 +297,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
             globalInstall: flags.global,
             port: flags.port,
             dryRun: flags.dryRun,
+            localAiDir: flags.dir ? path.join(projectDir, ".droidpath-local-ai") : undefined,
           });
         }
       }
@@ -503,6 +509,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       let binPath = resolveMcpBinaryPath();
       if (!binPath) {
         binPath = await downloadNativeBinary({
+          allowUnverified: flags.allowUnverified,
           logger: (m) => io.err(`[DroidPath] ${m}`),
         });
       }

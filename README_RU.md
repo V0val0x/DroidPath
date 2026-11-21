@@ -7,35 +7,31 @@
 [![GitHub Release](https://img.shields.io/github/v/release/V0val0x/DroidPath?color=brightgreen)](https://github.com/V0val0x/DroidPath/releases)
 [![CI](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml/badge.svg)](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml)
 
-[English Version](README.md) | **Русская версия**
+[English Version](README.md) | **Русская версия** · [Политика безопасности](SECURITY.md) · [История изменений](CHANGELOG.md)
 
 ![Демо персистентного A* UI-роутера DroidPath](./assets/demo-droidpath-presentation.gif)
 
 **DroidPath** избавляет ИИ-агентов от медленных и дорогих циклов *«скриншот → рассуждение VLM → клик»* при автоматизации Android. Вместо анализа скриншотов на каждом шаге DroidPath стримит живой **Shadow DOM** напрямую из Accessibility/Window API, компилирует переходы между экранами в **персистентный Spatial Graph** и проходит многошаговые маршруты детерминированным **алгоритмом A\*** за миллисекунды — с **нулём промежуточных вызовов LLM**.
 
-Версия 2.0 перенесена на **кроссплатформенный Rust (`droidpath-core`)** без JVM, компактный нативный **MCP CLI (`droidpath-mcp`, ~1.8 МБ)**, **Tauri v2 Desktop HUD (`~3.9 МБ`)** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **установку в 1 клик** (`npx droidpath`, `install.sh`, `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
+Построен на **кроссплатформенном Rust (`droidpath-core`)** без JVM, компактном нативном **MCP CLI (`droidpath-mcp`, ~1.8 МБ)**, **Tauri v2 Desktop HUD (`~3.9 МБ`)** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **нативных установщиках в 1 клик с SHA-256 проверкой** (`install.sh` / `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
 
 ---
 
-## Установка в 1 клик (Zero-Friction Onboarding)
+## Требования
 
-### Вариант A: `npx droidpath` (Windows · Linux · macOS)
+- Устройство **Android 8.0+ (API 26+)** с включённой **Отладкой по USB** или **Беспроводной отладкой** (установка APK и root не требуются).
+- Установленные **Android Platform Tools (`adb`)** на компьютере:
+  - **macOS:** `brew install android-platform-tools`
+  - **Windows:** `winget install Google.PlatformTools`
+  - **Linux (Debian/Ubuntu):** `sudo apt install adb`
 
-Содержит встроенный `android-daemon.jar` — одной командой пушит демон с SHA-256 кешированием (`adb push`), пробрасывает порт (`adb forward`), запускает `app_process` и автоматически прописывает MCP в Cursor, Claude Desktop/Code, Gemini CLI, Antigravity, LM Studio и локальных ИИ-рантаймах (а также идемпотентные правила агента по умолчанию, либо пропуск через `--no-rules`):
+---
 
-```bash
-# Старт в 1 клик: деплой демона + авто-настройка MCP и правил (Cursor / Claude / Gemini / Antigravity)
-npx droidpath start --configure
+## Быстрый старт (Установка в 1 клик)
 
-# Отдельные команды:
-npx droidpath init --client all       # Авто-настройка Cursor, Claude, Gemini CLI, Antigravity, локальных ИИ и правил агента
-npx droidpath rules --format local    # Установка .cursorrules/CLAUDE.md/GEMINI.md или экспорт промпта для локальных LLM
-npx droidpath daemon deploy           # SHA-256 adb push + adb forward + app_process
-npx droidpath mcp --stdio             # Запуск нативного Rust MCP-сервера с авто-деплоем демона
-npx droidpath doctor                  # Полная диагностика ADB, устройства, демона и графа
-```
+### Вариант A: Нативные установщики (`install.sh` / `install.ps1` — рекомендуется, Node.js не требуется)
 
-### Вариант B: Установщики без Node.js (`install.sh` / `install.ps1`)
+Скачивает готовый нативный бинарник `droidpath-mcp` и `android-daemon.jar` напрямую из [GitHub Releases](https://github.com/V0val0x/DroidPath/releases), фиксирует тег релиза при редиректах на CDN, проверяет **SHA-256** по `checksums.txt` в режиме fail-closed, разворачивает демон по ADB и автоматически настраивает MCP-клиенты (`cursor`, `claude`, `gemini`, `antigravity` или `all`):
 
 **macOS и Linux:**
 ```bash
@@ -44,9 +40,117 @@ curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/inst
 
 **Windows (PowerShell):**
 ```powershell
+# Установка droidpath-mcp.exe + android-daemon.jar и добавление ~/.droidpath/bin в User PATH:
 irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
-# Или локально с авто-деплоем и настройкой MCP:
+
+# Установка + деплой демона + авто-настройка Cursor, Claude Desktop, Gemini CLI и Antigravity:
+$env:DROIDPATH_DEPLOY="1"; $env:DROIDPATH_CONFIGURE_MCP="all"; irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
+
+# Или из локального клона с явными параметрами:
 .\scripts\install.ps1 -Deploy -ConfigureMcp all
+```
+
+После установки `droidpath-mcp` находится в `~/.droidpath/bin/droidpath-mcp` (Windows: `%USERPROFILE%\.droidpath\bin\droidpath-mcp.exe`) рядом с `~/.droidpath/share/android-daemon.jar`:
+
+```bash
+droidpath-mcp doctor             # Полная диагностика ADB, устройства, daemon JAR, :27189 и графа
+droidpath-mcp deploy             # SHA-256 adb push + adb forward + запуск app_process
+droidpath-mcp --stdio            # Запуск stdio JSON-RPC 2.0 MCP-сервера
+droidpath-mcp --http --port 8766 # Запуск локального HTTP + SSE MCP-сервера (127.0.0.1:8766/sse)
+```
+
+> **Установщики Desktop HUD:** Готовые сборки Tauri v2 Desktop HUD (`.dmg`, `.deb`, `.AppImage`, `.msi`, `.exe`) также приложены к каждому [GitHub Release](https://github.com/V0val0x/DroidPath/releases) с контрольными суммами в `checksums.txt`.
+
+---
+
+### Вариант B: Готовые MCP-конфиги для клиентов (Copy-Paste)
+
+После установки из Варианта A (или сборки из исходников) подключите `droidpath-mcp` в любом MCP-клиенте:
+
+#### Claude Desktop и Cursor (`stdio`)
+- **Claude Desktop:** `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows), `~/.config/Claude/claude_desktop_config.json` (Linux)
+- **Cursor:** `~/.cursor/mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "droidpath": {
+      "command": "/Users/<you>/.droidpath/bin/droidpath-mcp",
+      "args": ["--stdio", "--daemon-jar", "/Users/<you>/.droidpath/share/android-daemon.jar"]
+    }
+  }
+}
+```
+> На **Windows** укажите `"command": "C:\\Users\\<you>\\.droidpath\\bin\\droidpath-mcp.exe"` и `"C:\\Users\\<you>\\.droidpath\\share\\android-daemon.jar"`. Если `~/.droidpath/bin` добавлен в `PATH`, достаточно `"command": "droidpath-mcp"` и `"args": ["--stdio"]` — сервер сам найдёт `../share/android-daemon.jar`.
+
+#### Claude Code
+```bash
+claude mcp add droidpath -- ~/.droidpath/bin/droidpath-mcp --stdio --daemon-jar ~/.droidpath/share/android-daemon.jar
+```
+
+#### VS Code / GitHub Copilot (`.vscode/mcp.json`)
+```json
+{
+  "servers": {
+    "droidpath": {
+      "type": "stdio",
+      "command": "droidpath-mcp",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+#### Gemini CLI (`~/.gemini/settings.json`) и Antigravity (`~/.gemini/antigravity/mcp_config.json`)
+```json
+{
+  "mcpServers": {
+    "droidpath": {
+      "command": "droidpath-mcp",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+#### LM Studio / OpenWebUI / MCP Inspector / Локальные ИИ (Loopback HTTP + SSE)
+```bash
+droidpath-mcp --http --port 8766
+# Опциональная Bearer-авторизация: droidpath-mcp --http --port 8766 --auth-token "<секрет>"
+```
+```json
+{
+  "mcpServers": {
+    "droidpath": {
+      "url": "http://127.0.0.1:8766/sse"
+    }
+  }
+}
+```
+> Слушает строго `127.0.0.1` с проверкой RFC 6454 loopback `Origin`/`Host` и контролем `Content-Length`.
+
+---
+
+### Вариант C: Node.js CLI (`packages/droidpath-cli` — из локального клона / `npm link`)
+
+Сопутствующий Node.js CLI (`packages/droidpath-cli`) добавляет идемпотентную установку правил для агентов (`.cursorrules`, `CLAUDE.md`, `GEMINI.md`, `.agent/rules/droidpath.md`, экспорт схем OpenAI tools и компактного промпта для локальных моделей).
+
+> **Примечание:** пакет `droidpath` ещё не опубликован в реестре `npmjs.org`, поэтому сейчас запускайте его из локального клона или через `npm link` (после публикации в npm также заработает `npx -y droidpath ...`):
+
+```bash
+git clone https://github.com/V0val0x/DroidPath.git
+cd DroidPath
+
+# Запуск напрямую из клона:
+node packages/droidpath-cli/bin/droidpath.mjs start --configure
+node packages/droidpath-cli/bin/droidpath.mjs doctor
+
+# Или глобальная привязка локально:
+npm --prefix packages/droidpath-cli link
+droidpath init --client all       # Настройка Cursor, Claude, Gemini CLI, Antigravity, LM Studio и Local AI + правил агента
+droidpath rules --format local    # Вывод компактного промпта для локальных LLM (или --format openai для схем инструментов)
+droidpath daemon deploy           # SHA-256 adb push + adb forward + app_process
+droidpath mcp --stdio             # Запуск нативного Rust MCP-сервера с авто-деплоем демона
 ```
 
 ---
@@ -55,7 +159,7 @@ irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1
 
 ```mermaid
 flowchart LR
-    Agent["ИИ-агент (Claude / Cursor / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~1.8 МБ)\n+ npx droidpath CLI"]
+    Agent["ИИ-агент (Claude / Cursor / Gemini / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~1.8 МБ)\nНативный CLI и MCP-сервер"]
 
     subgraph Host["Windows · Linux · macOS Хост (Rust droidpath-core + Tauri v2 HUD)"]
         CLI <-->|"Поиск путей и пассивное обучение"| Bridge["ShadowGraphBridge"]
@@ -86,11 +190,12 @@ flowchart LR
 2. **Layer 2 — Кроссплатформенное ядро на Rust (`crates/droidpath-core`):**
    - Побитово совместимый FNV-1a 64-bit `ScreenLayoutHasher`: очищает часы, даты, e-commerce токены (`<PRICE>`, `<ETA>`, `<WEIGHT>`), номера банковских карт по алгоритму Луна (`<CARD>`) и контекстные 2FA/OTP-коды (`<OTP>`), декоративные `ImageView` баннеры и системные push-баннеры `com.android.systemui`.
    - `SpatialGraphEngine` строит мультиграф с компактификацией по Жаккару (`>= 0.90`), классификацией опасных рёбер (`HazardousActionClassifier`), деградацией и автоочисткой нестабильных рёбер (`consecutiveFailures`), ациклическим остовным DAG и **100% двусторонней совместимостью `shadow_graph.json`** с Swift `AndOnMac`.
+   - **Zero-PII Seed Graph для Android Settings (`SeedGraphCatalog`) и гидратация Seed-to-Real:** поставляется с предзаполненным кросс-девайсным графом на 20 канонических экранов и 19 детерминированных рёбер `com.android.settings` (без координат и PII, с EN/RU и cross-OEM алиасами для Pixel, AOSP, OneUI, HyperOS, OxygenOS). На абсолютно новом телефоне `android_navigate_to_node` строит маршрут с домашнего экрана (`LaunchApp("com.android.settings")`) до *Ночной подсветки*, *Для разработчиков* или *Wi-Fi* с первого запуска и автоматически **гидрирует** пройденные seed-вершины и рёбра в реальные хеши, селекторы и координаты устройства (отключается через `DROIDPATH_DISABLE_SEED_GRAPH=1`).
 
 3. **Layer 3 — A\* роутер, MCP CLI (`crates/droidpath-mcp`) и Tauri v2 Desktop HUD (`apps/droidpath-desktop`):**
    - `AStarPathfinder` + `MacroExecutionEngine` с cold-start исследованием (`android_explore_and_click` / `auto_explore: true`), forward-skip восстановлением (`1 -> 3/4`), размоткой стека экранов `Back-to-Root`, поисковым скроллом `Smart Scroll-to-Selector`, перепланированием после скролла, универсальным закрытием промо-попапов (`UniversalDismissDetector`), смахиванием пуш-уведомлений, HITL-подтверждением опасных действий (`requires_confirmation` / `confirmed: true`) и паузой на `FLAG_SECURE` (таймаут ожидания 60 с по умолчанию).
-   - **LLM Onboarding и правила:** включает готовые `.cursorrules`, `CLAUDE.md`, `GEMINI.md` и `docs/system_prompt.md` (идемпотентно устанавливаются через `npx droidpath init` / `npx droidpath rules` или пропускаются флагом `--no-rules`), чтобы облачные и локальные модели работали через Shadow DOM и не спамили `android_screenshot`.
-   - **Tauri v2 Desktop HUD** объединяет встроенное зеркало экрана (`scrcpy-server` H.264 -> WebCodecs `<canvas>` с автоматическим fallback на `screencap`), трёхцветный **Agentic HUD** (**Красный** — автономная работа, **Жёлтый** — ожидание подтверждения HITL с интерактивными кнопками *Approve / Cancel*, **Синий** — ожидание биометрии / `FLAG_SECURE`) и интерактивный SVG-инспектор графа в одном окне — работает на **Windows, macOS и Linux Wayland/X11** и сохраняет пассивное обучение кликами.
+   - **LLM Onboarding и правила:** включает готовые `.cursorrules`, `CLAUDE.md`, `GEMINI.md` и `docs/system_prompt.md` (идемпотентно устанавливаются через `packages/droidpath-cli` `init` / `rules`), чтобы облачные и локальные модели работали через Shadow DOM и не спамили `android_screenshot`.
+   - **Tauri v2 Desktop HUD** объединяет встроенное зеркало экрана (`scrcpy-server` H.264 -> WebCodecs `<canvas>` с автоматическим fallback на `screencap`), трёхцветный **Agentic HUD** (**Красный** — автономная работа, **Жёлтый** — ожидание подтверждения HITL с интерактивными кнопками *Approve / Cancel*, **Синий** — ожидание биометрии / `FLAG_SECURE`) и интерактивный SVG-инспектор графа (с визуальным разделением seed и гидрированных вершин) в одном окне — работает на **Windows, macOS и Linux Wayland/X11** и сохраняет пассивное обучение кликами.
 
 ---
 
@@ -104,7 +209,7 @@ flowchart LR
 | **Полное время маршрута** | ~30 000–40 000 мс (оценка) | **2 003 мс** (7 шагов · 1x live) |
 | **Обратная связь и ввод** | Тяжёлые PNG (`screencap`) + stateless ADB | Субмиллисекундный Shadow DOM NDJSON + нативный `UiAutomation` `:27189` |
 
-## Comparison with Alternatives
+## Сравнение с аналогами
 
 Существующие решения используют stateless ADB-биндинги, что даёт 2–4 секунды задержки на каждое действие и заставляет LLM микроменеджить интерфейс. DroidPath (и [AndOnMac](https://github.com/V0val0x/AndOnMac)) использует персистентный направленный ациклический граф (DAG) и A*-маршрутизацию на Windows, Linux и macOS, снижая latency до `<1s` на клик и полностью снимая нагрузку с LLM при навигации по известным маршрутам.
 
@@ -130,7 +235,7 @@ cargo test -p droidpath-core -p droidpath-mcp
 # 2. Сборка нативного release-бинарника droidpath-mcp (~1.8 МБ, без JVM)
 cargo build --release -p droidpath-mcp
 
-# 3. Тесты Node.js 1-клик CLI
+# 3. Тесты Node.js CLI и установщиков
 npm --prefix packages/droidpath-cli test
 
 # 4. Запуск / сборка кроссплатформенного Tauri v2 Desktop HUD
@@ -145,19 +250,30 @@ npm --prefix packages/droidpath-cli run sync-daemon
 
 ---
 
-## Доступные MCP-инструменты
+## Доступные MCP-инструменты (9 инструментов)
 
 | Инструмент | Описание |
 | :--- | :--- |
-| `android_navigate_to_node` | A\* маршрутизация к целевому тексту, `resource-id`, пакету или каноническому хешу (`0x...`), включая cold-start `auto_explore: true` и HITL `confirmed: true` |
+| `android_navigate_to_node` | A\* маршрутизация по сохранённым и seed-экранам к целевому тексту, `resource-id`, пакету или каноническому хешу (`0x...`), включая cold-start `auto_explore: true` и HITL `confirmed: true` |
 | `android_explore_and_click` | Dynamic Auto-Explore без предварительной записи графа: скоринг живого Shadow DOM, поисковый скролл со сменой направления у дна, клик и достраивание рёбер DAG на лету (либо топ-20 PII-очищенных `candidates`) |
-| `android_get_ui_tree` | Чтение дерева UI из быстрого Shadow DOM потока (с fallback на `uiautomator`) |
-| `android_graph_stats` | Статистика графа: число вершин/рёбер, текущий хеш, состояние демона, путь сохранения |
+| `android_get_ui_tree` | Чтение дерева UI из быстрого Shadow DOM потока за `<1ms` (с fallback на `uiautomator`) |
+| `android_graph_stats` | Статистика графа: число вершин/рёбер (`seed_vertex_count`, `hydrated_vertex_count`), текущий хеш, состояние демона, путь сохранения |
 | `android_list_devices` | Список подключённых Android-устройств по USB и Wi-Fi ADB |
 | `android_tap_element` | Клик по `(x, y)` или семантике (`text` / `resource_id` / `content_desc`) с записью в граф |
 | `android_swipe` | Свайп `(x1, y1) -> (x2, y2)` с обучением ребра графа |
-| `android_type_text` | Ввод ASCII и Unicode текста в активное поле |
-| `android_keyevent` | Отправка системных кнопок (`HOME`, `BACK`, `ENTER`, `APP_SWITCH`, `POWER`) |
+| `android_type_text` | Ввод ASCII и Unicode/кириллического текста (через безопасную вставку буфера обмена) в активное поле |
+| `android_keyevent` | Отправка системных кнопок (`HOME`, `BACK`, `ENTER`, `RECENTS`/`APP_SWITCH`, `VOLUME_UP`, `VOLUME_DOWN`, `POWER`) |
+
+---
+
+## Безопасность, приватность и SHA-256 целостность релизов
+
+Подробная политика безопасности и порядок сообщений об уязвимостях: [SECURITY.md](./SECURITY.md).
+
+- **Zero-PII на устройстве и на диске:** поля паролей маскируются в `***` внутри `android-daemon` до стриминга; номера карт (проверка Луна) и 2FA/OTP-коды очищаются в `<CARD>` / `<OTP>` до хеширования и записи в `shadow_graph.json`.
+- **Строго Loopback (`127.0.0.1`):** и `android-daemon` (`127.0.0.1:27189`), и `droidpath-mcp --http` (`127.0.0.1:8766`) слушают только `127.0.0.1`, проверяют RFC 6454 loopback `Origin`/`Host` и `Content-Length` (защита от DNS rebinding и CSRF) и поддерживают `Authorization: Bearer <token>`.
+- **Обязательные шлюзы HITL и биометрии:** необратимые действия (`Pay`, `Buy`, `Transfer`, `Send`, `Delete`, `Factory Reset`) останавливаются со статусом `requires_confirmation` до явного `confirmed: true`; экраны `FLAG_SECURE` / биометрии немедленно ставят автоматизацию на паузу (`secure_screen_active`).
+- **Проверка SHA-256 релизов:** каждый GitHub Release публикует `checksums.txt`; `install.sh`, `install.ps1` и `packages/droidpath-cli` проверяют SHA-256 в режиме fail-closed с 2-hop фиксацией CDN redirect URL и атомарной установкой.
 
 ---
 

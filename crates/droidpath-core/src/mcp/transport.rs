@@ -133,8 +133,15 @@ impl DroidPathHttpServer {
         let Some(raw) = raw_host else {
             return false;
         };
+        if raw.chars().any(|c| c.is_control()) {
+            return false;
+        }
         let trimmed = raw.trim().to_ascii_lowercase();
-        if trimmed.is_empty() {
+        if trimmed.is_empty()
+            || trimmed
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '@' | '/' | '?' | '#' | '\\'))
+        {
             return false;
         }
         let host = if let Some(rest) = trimmed.strip_prefix('[') {
@@ -144,7 +151,10 @@ impl DroidPathHttpServer {
                         let Some(port_str) = tail.strip_prefix(':') else {
                             return false;
                         };
-                        if port_str.is_empty() || !port_str.chars().all(|c| c.is_ascii_digit()) {
+                        if port_str.is_empty()
+                            || !port_str.chars().all(|c| c.is_ascii_digit())
+                            || port_str.parse::<u16>().ok().filter(|&p| p > 0).is_none()
+                        {
                             return false;
                         }
                     }
@@ -153,7 +163,10 @@ impl DroidPathHttpServer {
                 None => return false,
             }
         } else if let Some((h, port_str)) = trimmed.split_once(':') {
-            if port_str.is_empty() || !port_str.chars().all(|c| c.is_ascii_digit()) {
+            if port_str.is_empty()
+                || !port_str.chars().all(|c| c.is_ascii_digit())
+                || port_str.parse::<u16>().ok().filter(|&p| p > 0).is_none()
+            {
                 return false;
             }
             h
@@ -167,19 +180,30 @@ impl DroidPathHttpServer {
         let Some(raw) = raw_origin else {
             return true;
         };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return true;
+        if raw.chars().any(|c| c.is_control()) {
+            return false;
         }
-        let rest = if let Some(r) = trimmed.strip_prefix("http://") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '@' | '?' | '#' | '\\'))
+        {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let rest = if let Some(r) = lower.strip_prefix("http://") {
             r
-        } else if let Some(r) = trimmed.strip_prefix("https://") {
+        } else if let Some(r) = lower.strip_prefix("https://") {
             r
         } else {
             return false;
         };
-        let authority = rest.split('/').next().unwrap_or("");
-        Self::is_allowed_loopback_host(Some(authority))
+        // Strict RFC 6454 Origin: scheme://host[:port] only (zero path, query, fragment, or userinfo).
+        if rest.contains('/') {
+            return false;
+        }
+        Self::is_allowed_loopback_host(Some(rest))
     }
 
     fn constant_time_equals(lhs: &str, rhs: &str) -> bool {
@@ -292,22 +316,59 @@ impl DroidPathHttpServer {
             .to_string();
 
         let mut headers = HashMap::new();
+        let mut host_headers: Vec<String> = Vec::new();
+        let mut origin_headers: Vec<String> = Vec::new();
+        let mut content_length_headers: Vec<String> = Vec::new();
         for line in lines {
+            if line.contains('\r') || line.contains('\n') || line.contains('\0') {
+                Self::send_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "text/plain",
+                    b"Malformed header",
+                    None,
+                )
+                .await;
+                return;
+            }
             if let Some((k, v)) = line.split_once(':') {
-                headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                let key = k.trim().to_ascii_lowercase();
+                let val = v.trim().to_string();
+                match key.as_str() {
+                    "host" => host_headers.push(val.clone()),
+                    "origin" => origin_headers.push(val.clone()),
+                    "content-length" => content_length_headers.push(val.clone()),
+                    _ => {}
+                }
+                headers.insert(key, val);
             }
         }
 
-        if !Self::is_allowed_loopback_host(headers.get("host").map(String::as_str))
-            || !Self::is_allowed_origin(headers.get("origin").map(String::as_str))
-        {
+        let host_ok = host_headers.len() == 1
+            && Self::is_allowed_loopback_host(host_headers.first().map(String::as_str));
+        let origin_ok = match origin_headers.len() {
+            0 => true,
+            1 => Self::is_allowed_origin(origin_headers.first().map(String::as_str)),
+            _ => false,
+        };
+
+        if !host_ok || !origin_ok {
             Self::send_http_response(
                 &mut stream,
                 "403 Forbidden",
                 "text/plain",
                 b"Forbidden host/origin",
+                None,
             )
             .await;
+            return;
+        }
+
+        let allowed_origin = origin_headers.first().map(String::as_str);
+
+        if method == "OPTIONS" {
+            Self::send_http_response(&mut stream, "204 No Content", "text/plain", b"", allowed_origin)
+                .await;
             return;
         }
 
@@ -321,18 +382,27 @@ impl DroidPathHttpServer {
             {
                 auth_header[7..].trim()
             } else {
-                Self::send_http_response(&mut stream, "401 Unauthorized", "text/plain", b"Unauthorized").await;
+                Self::send_http_response(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    b"Unauthorized",
+                    allowed_origin,
+                )
+                .await;
                 return;
             };
             if !Self::constant_time_equals(provided, &auth_token) {
-                Self::send_http_response(&mut stream, "401 Unauthorized", "text/plain", b"Unauthorized").await;
+                Self::send_http_response(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    b"Unauthorized",
+                    allowed_origin,
+                )
+                .await;
                 return;
             }
-        }
-
-        if method == "OPTIONS" {
-            Self::send_http_response(&mut stream, "204 No Content", "text/plain", b"").await;
-            return;
         }
 
         let is_chunked = headers
@@ -356,6 +426,7 @@ impl DroidPathHttpServer {
                                 "413 Payload Too Large",
                                 "text/plain",
                                 b"Payload Too Large",
+                                allowed_origin,
                             )
                             .await;
                             return;
@@ -368,6 +439,7 @@ impl DroidPathHttpServer {
                                 "408 Request Timeout",
                                 "text/plain",
                                 b"Request Timeout",
+                                allowed_origin,
                             )
                             .await;
                             return;
@@ -379,6 +451,7 @@ impl DroidPathHttpServer {
                                     "400 Bad Request",
                                     "text/plain",
                                     b"Incomplete chunked body",
+                                    allowed_origin,
                                 )
                                 .await;
                                 return;
@@ -393,6 +466,7 @@ impl DroidPathHttpServer {
                             "413 Payload Too Large",
                             "text/plain",
                             b"Payload Too Large",
+                            allowed_origin,
                         )
                         .await;
                         return;
@@ -403,6 +477,7 @@ impl DroidPathHttpServer {
                             "400 Bad Request",
                             "text/plain",
                             msg.as_bytes(),
+                            allowed_origin,
                         )
                         .await;
                         return;
@@ -410,36 +485,59 @@ impl DroidPathHttpServer {
                 }
             }
         } else {
-            let content_length: usize = if let Some(raw_cl) = headers.get("content-length") {
-                match raw_cl.trim().parse::<isize>() {
-                    Ok(n) if n >= 0 => {
-                        let u = n as usize;
-                        if u > Self::MAX_BODY_BYTES {
-                            Self::send_http_response(
-                                &mut stream,
-                                "413 Payload Too Large",
-                                "text/plain",
-                                b"Payload Too Large",
-                            )
-                            .await;
-                            return;
-                        }
-                        u
-                    }
-                    _ => {
+            let mut parsed_cl: Option<usize> = None;
+            for raw_cl in &content_length_headers {
+                let trimmed = raw_cl.trim();
+                if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_digit()) {
+                    Self::send_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        b"Invalid Content-Length",
+                        allowed_origin,
+                    )
+                    .await;
+                    return;
+                }
+                let Ok(u) = trimmed.parse::<usize>() else {
+                    Self::send_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        b"Invalid Content-Length",
+                        allowed_origin,
+                    )
+                    .await;
+                    return;
+                };
+                if u > Self::MAX_BODY_BYTES {
+                    Self::send_http_response(
+                        &mut stream,
+                        "413 Payload Too Large",
+                        "text/plain",
+                        b"Payload Too Large",
+                        allowed_origin,
+                    )
+                    .await;
+                    return;
+                }
+                if let Some(prev) = parsed_cl {
+                    if prev != u {
                         Self::send_http_response(
                             &mut stream,
                             "400 Bad Request",
                             "text/plain",
-                            b"Invalid Content-Length",
+                            b"Conflicting Content-Length",
+                            allowed_origin,
                         )
                         .await;
                         return;
                     }
+                } else {
+                    parsed_cl = Some(u);
                 }
-            } else {
-                0
-            };
+            }
+            let content_length: usize = parsed_cl.unwrap_or(0);
 
             while buf.len() - body_start < content_length {
                 let remaining =
@@ -450,6 +548,7 @@ impl DroidPathHttpServer {
                         "408 Request Timeout",
                         "text/plain",
                         b"Request Timeout",
+                        allowed_origin,
                     )
                     .await;
                     return;
@@ -461,6 +560,7 @@ impl DroidPathHttpServer {
                             "400 Bad Request",
                             "text/plain",
                             b"Incomplete request body",
+                            allowed_origin,
                         )
                         .await;
                         return;
@@ -476,8 +576,9 @@ impl DroidPathHttpServer {
 
         if method == "GET" && (target_path == "/sse" || target_path == "/") {
             let session_id = Uuid::new_v4().to_string();
+            let cors_headers = Self::loopback_cors_headers(allowed_origin);
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\nevent: endpoint\ndata: /message?sessionId={session_id}\n\n"
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\n{cors_headers}Connection: keep-alive\r\n\r\nevent: endpoint\ndata: /message?sessionId={session_id}\n\n"
             );
             if stream.write_all(header.as_bytes()).await.is_err()
                 || stream.flush().await.is_err()
@@ -514,8 +615,14 @@ impl DroidPathHttpServer {
                 DroidPathMcpServerCore::SERVER_VERSION,
                 DroidPathMcpServerCore::PROTOCOL_VERSION
             );
-            Self::send_http_response(&mut stream, "200 OK", "application/json", health.as_bytes())
-                .await;
+            Self::send_http_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                health.as_bytes(),
+                allowed_origin,
+            )
+            .await;
             return;
         }
 
@@ -535,20 +642,55 @@ impl DroidPathHttpServer {
                         "202 Accepted",
                         "application/json",
                         b"{\"ok\":true}",
+                        allowed_origin,
                     )
                     .await;
                     return;
                 }
             }
             if let Some(data) = resp_data {
-                Self::send_http_response(&mut stream, "200 OK", "application/json", &data).await;
+                Self::send_http_response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &data,
+                    allowed_origin,
+                )
+                .await;
             } else {
-                Self::send_http_response(&mut stream, "202 Accepted", "application/json", b"").await;
+                Self::send_http_response(
+                    &mut stream,
+                    "202 Accepted",
+                    "application/json",
+                    b"",
+                    allowed_origin,
+                )
+                .await;
             }
             return;
         }
 
-        Self::send_http_response(&mut stream, "404 Not Found", "text/plain", b"Not Found").await;
+        Self::send_http_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"Not Found",
+            allowed_origin,
+        )
+        .await;
+    }
+
+    fn loopback_cors_headers(allowed_origin: Option<&str>) -> String {
+        match allowed_origin {
+            Some(origin)
+                if !origin.is_empty() && !origin.chars().any(|c| c.is_control()) =>
+            {
+                format!(
+                    "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nVary: Origin\r\n"
+                )
+            }
+            _ => String::new(),
+        }
     }
 
     async fn send_http_response(
@@ -556,9 +698,11 @@ impl DroidPathHttpServer {
         status: &str,
         content_type: &str,
         body: &[u8],
+        allowed_origin: Option<&str>,
     ) {
+        let cors_headers = Self::loopback_cors_headers(allowed_origin);
         let header = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n{cors_headers}Connection: close\r\n\r\n",
             body.len()
         );
         let _ = stream.write_all(header.as_bytes()).await;
