@@ -627,12 +627,16 @@ test("downloadNativeBinary and install.sh handle 2-hop GitHub -> external S3 CDN
   const winX64Asset = "droidpath-mcp-x86_64-pc-windows-msvc.exe";
   const jarAsset = "android-daemon.jar";
   const goodBin = Buffer.from("#!/bin/sh\necho github-cdn-ok\n");
-  const goodWinX64 = Buffer.from("MZ-fake-win-x64-binary");
+  const goodWinX64 = asset === winX64Asset ? goodBin : Buffer.from("MZ-fake-win-x64-binary");
   const goodJar = Buffer.from("PK\x03\x04cdn-jar-ok");
   const binSha = createHash("sha256").update(goodBin).digest("hex");
   const winX64Sha = createHash("sha256").update(goodWinX64).digest("hex");
   const jarSha = createHash("sha256").update(goodJar).digest("hex");
-  const manifestBody = `${binSha}  ${asset}\n${winX64Sha}  ${winX64Asset}\n${jarSha}  ${jarAsset}\n`;
+  const manifestLines = [`${binSha}  ${asset}`, `${jarSha}  ${jarAsset}`];
+  if (asset !== winX64Asset) {
+    manifestLines.push(`${winX64Sha}  ${winX64Asset}`);
+  }
+  const manifestBody = `${manifestLines.join("\n")}\n`;
 
   const githubReqs = [];
   const cdnReqs = [];

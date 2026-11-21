@@ -133,6 +133,22 @@ function Resolve-PinnedReleaseBaseUrl {
     return $PinnedBase
 }
 
+function Get-FileSha256Hex {
+    param([string]$FilePath)
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $Stream = [System.IO.File]::OpenRead($FilePath)
+        try {
+            $HashBytes = $Sha.ComputeHash($Stream)
+            return ([System.BitConverter]::ToString($HashBytes) -replace '-', '').ToLowerInvariant()
+        } finally {
+            $Stream.Dispose()
+        }
+    } finally {
+        $Sha.Dispose()
+    }
+}
+
 function Assert-AssetSha256 {
     param(
         [string]$FilePath,
@@ -143,7 +159,7 @@ function Assert-AssetSha256 {
         throw "Asset '$AssetName' is missing from checksums.txt. Refusing unverified install (pass -AllowUnverified or set DROIDPATH_ALLOW_UNVERIFIED=1 to override)."
     }
     $Expected = $Checksums[$AssetName].ToLowerInvariant()
-    $Actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Actual = Get-FileSha256Hex -FilePath $FilePath
     if ($Actual -ne $Expected) {
         throw "SHA-256 verification failed for '$AssetName': expected $Expected, got $Actual. Refusing to install tampered or corrupted artifact."
     }
