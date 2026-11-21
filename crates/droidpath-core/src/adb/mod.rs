@@ -439,7 +439,7 @@ impl DroidPathActionExecutor {
                 return Ok(());
             }
         }
-        let dur = duration_ms.unwrap_or(280).max(120).to_string();
+        let dur = duration_ms.unwrap_or(280).clamp(120, 5000).to_string();
         let (x1s, y1s, x2s, y2s) = (
             x1.to_string(),
             y1.to_string(),
