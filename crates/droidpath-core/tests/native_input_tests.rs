@@ -872,3 +872,90 @@ async fn intermediate_scroll_settles_on_one_row_shift_and_explore_drains_mid_swi
     assert_eq!(report.steps.len(), 2);
     assert_eq!(report.final_hash, h_goal);
 }
+
+#[tokio::test]
+async fn tcp_client_drop_cleans_pending_waiter_and_wait_for_hello_enables_cold_start_native_input() {
+    // 1. Server sends hello, holds first tap reply indefinitely so dropping the caller future
+    //    must clean up pending_inputs via PendingInputGuard, and still answers the second tap.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        let Ok((socket, _)) = listener.accept().await else {
+            return;
+        };
+        let (read_half, mut write_half) = socket.into_split();
+        let hello = "{\"type\":\"hello\",\"protocol_version\":1,\"format\":\"ndjson/1\",\"sdk_int\":37,\"device_model\":\"MockPixel\",\"pid\":101,\"capabilities\":[\"input\"]}\n";
+        let _ = write_half.write_all(hello.as_bytes()).await;
+        let _ = write_half.flush().await;
+
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        let mut count = 0usize;
+        while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+            let trimmed = line.trim().to_string();
+            line.clear();
+            if trimmed.is_empty() {
+                continue;
+            }
+            count += 1;
+            if count == 1 {
+                // Intentionally never reply to the 1st command so the caller cancels/drops it.
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&trimmed) else {
+                continue;
+            };
+            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let cmd = v.get("cmd").and_then(|c| c.as_str()).unwrap_or("tap");
+            let ack = format!(
+                "{{\"type\":\"input_result\",\"id\":{id},\"cmd\":\"{cmd}\",\"ok\":true,\"elapsed_ms\":3,\"ts_ms\":1002}}\n"
+            );
+            let _ = write_half.write_all(ack.as_bytes()).await;
+            let _ = write_half.flush().await;
+        }
+    });
+
+    let client = Arc::new(DaemonTcpClient::new(DaemonEndpointConfiguration::with_port(
+        port,
+    )));
+    client.start().await;
+    // Cold-start wait_for_hello must observe hello promptly (<500ms) and unlock supports_native_input.
+    let got_hello = client.wait_for_hello(Duration::from_millis(500)).await;
+    assert!(got_hello, "wait_for_hello should succeed on live loopback daemon");
+    assert!(client.supports_native_input().await);
+
+    // Abort/drop in-flight inject_tap -> PendingInputGuard must remove the waiter immediately.
+    let timed = tokio::time::timeout(Duration::from_millis(40), client.inject_tap(100, 200)).await;
+    assert!(timed.is_err(), "outer timeout should drop un-replied inject_tap");
+    assert_eq!(
+        client.pending_input_count(),
+        0,
+        "Dropping inject_tap future must not leak pending_inputs entry"
+    );
+
+    // Next tap still succeeds cleanly.
+    let ok = client.inject_tap(300, 400).await.expect("second tap ok");
+    assert!(ok.ok);
+    assert_eq!(client.pending_input_count(), 0);
+    client.stop().await;
+
+    // 2. wait_for_hello on a closed loopback port fails fast instead of stalling for full timeout.
+    let closed_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+
+    let dead_client = Arc::new(DaemonTcpClient::new(DaemonEndpointConfiguration::with_port(
+        closed_port,
+    )));
+    dead_client.start().await;
+    let t0 = Instant::now();
+    let dead_hello = dead_client.wait_for_hello(Duration::from_millis(500)).await;
+    assert!(!dead_hello, "wait_for_hello must return false on closed port");
+    assert!(
+        t0.elapsed() < Duration::from_millis(350),
+        "wait_for_hello should fail fast on ECONNREFUSED, took {:?}",
+        t0.elapsed()
+    );
+    dead_client.stop().await;
+}

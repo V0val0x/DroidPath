@@ -512,6 +512,12 @@ impl DroidPathMcpServerCore {
                     let _ = self
                         .manager
                         .bridge
+                        .client
+                        .wait_for_hello(std::time::Duration::from_millis(150))
+                        .await;
+                    let _ = self
+                        .manager
+                        .bridge
                         .ensure_shadow_stream_ready(0.5, 15.0)
                         .await;
                     let attributed = if self.manager.bridge.dom_state.is_fresh(15.0).await {
@@ -630,6 +636,12 @@ impl DroidPathMcpServerCore {
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
+                let _ = self
+                    .manager
+                    .bridge
+                    .client
+                    .wait_for_hello(std::time::Duration::from_millis(150))
+                    .await;
                 let executor = self.manager.action_executor();
                 let effective_dur = duration_opt.unwrap_or(
                     if executor.supports_zero_fling_swipes(&serial).await {
@@ -734,6 +746,12 @@ impl DroidPathMcpServerCore {
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
+                let _ = self
+                    .manager
+                    .bridge
+                    .client
+                    .wait_for_hello(std::time::Duration::from_millis(150))
+                    .await;
                 self.manager
                     .record_action(AttributedUIAction::keyevent(raw.to_uppercase()))
                     .await;

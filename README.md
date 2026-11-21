@@ -79,7 +79,7 @@ flowchart LR
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM Daemon (`android-daemon/`):**
-   - Compiles into a standalone **646 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required — and injects native `UiAutomation` `tap`/`swipe`/`keyevent` gestures directly over TCP `:27189` (with zero-fling 120Hz swipes and automatic `adb` fallback).
+   - Compiles into a standalone **649 KB single-DEX JAR** (`android-daemon.jar`) launched via `app_process` — zero companion APK install required — and injects native `UiAutomation` `tap`/`swipe`/`keyevent` gestures directly over TCP `:27189` (with zero-fling 120Hz swipes and automatic `adb` fallback).
    - Enforces on-device **Privacy by Design**: binds its TCP socket strictly to `127.0.0.1` loopback (`adb forward`) and masks `isPassword` / sensitive editable fields to `"***"` before streaming over TCP `:27189`.
    - Streams full snapshots, compact NDJSON incremental diffs, foreground `TYPE_APPLICATION` window priority over `com.android.systemui` notifications, and `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` events on `FLAG_SECURE` or biometric prompts over TCP (`:27189`).
    - Deployed idempotently via SHA-256 verification and protected by automatic self-healing recovery.

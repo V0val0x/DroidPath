@@ -49,7 +49,7 @@ pub struct DaemonTcpClient {
     msg_tx: broadcast::Sender<WireMessage>,
     state_tx: broadcast::Sender<DaemonConnectionState>,
     next_input_id: AtomicU64,
-    pending_inputs: Arc<Mutex<HashMap<u64, InputWaiter>>>,
+    pending_inputs: Arc<std::sync::Mutex<HashMap<u64, InputWaiter>>>,
 }
 
 impl DaemonTcpClient {
@@ -77,7 +77,7 @@ impl DaemonTcpClient {
             msg_tx,
             state_tx,
             next_input_id: AtomicU64::new(1),
-            pending_inputs: Arc::new(Mutex::new(HashMap::new())),
+            pending_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -227,6 +227,64 @@ impl DaemonTcpClient {
         )
     }
 
+    /// Waits briefly for an in-progress handshake (`Connecting` or `Connected { hello: None }`)
+    /// to deliver `WireHello` so cold-start MCP calls can use native TCP input instead of
+    /// falling back to ADB while `hello` is still in flight. Returns immediately if already
+    /// ready or if the client is disconnected/waiting to reconnect/stopped.
+    pub async fn wait_for_hello(&self, max_wait: Duration) -> bool {
+        let mut rx = self.state_tx.subscribe();
+        match &*self.state_watch.read().await {
+            DaemonConnectionState::Connected { hello: Some(_) } => return true,
+            DaemonConnectionState::Disconnected
+            | DaemonConnectionState::WaitingToReconnect { .. }
+            | DaemonConnectionState::Stopped => return false,
+            DaemonConnectionState::Connecting
+            | DaemonConnectionState::Connected { hello: None } => {}
+        }
+        if max_wait.is_zero() {
+            return false;
+        }
+        let deadline = tokio::time::sleep(max_wait);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    return matches!(
+                        &*self.state_watch.read().await,
+                        DaemonConnectionState::Connected { hello: Some(_) }
+                    );
+                }
+                res = rx.recv() => {
+                    match res {
+                        Ok(DaemonConnectionState::Connected { hello: Some(_) }) => return true,
+                        Ok(DaemonConnectionState::Disconnected)
+                        | Ok(DaemonConnectionState::WaitingToReconnect { .. })
+                        | Ok(DaemonConnectionState::Stopped) => return false,
+                        Ok(DaemonConnectionState::Connecting)
+                        | Ok(DaemonConnectionState::Connected { hello: None }) => continue,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            match &*self.state_watch.read().await {
+                                DaemonConnectionState::Connected { hello: Some(_) } => return true,
+                                DaemonConnectionState::Disconnected
+                                | DaemonConnectionState::WaitingToReconnect { .. }
+                                | DaemonConnectionState::Stopped => return false,
+                                _ => continue,
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return false,
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn pending_input_count(&self) -> usize {
+        self.pending_inputs
+            .lock()
+            .map(|g| g.len())
+            .unwrap_or(0)
+    }
+
     pub async fn inject_tap(
         &self,
         x: i32,
@@ -292,12 +350,29 @@ impl DaemonTcpClient {
             });
         }
 
+        struct PendingInputGuard<'a> {
+            pending: &'a std::sync::Mutex<HashMap<u64, InputWaiter>>,
+            id: u64,
+        }
+        impl Drop for PendingInputGuard<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut guard) = self.pending.lock() {
+                    guard.remove(&self.id);
+                }
+            }
+        }
+
         let (tx, rx) = oneshot::channel();
         // Race-free order: register waiter BEFORE writing command to socket.
-        self.pending_inputs.lock().await.insert(id, tx);
+        if let Ok(mut guard) = self.pending_inputs.lock() {
+            guard.insert(id, tx);
+        }
+        let _cleanup_guard = PendingInputGuard {
+            pending: &self.pending_inputs,
+            id,
+        };
 
         if let Err(err) = self.send(command).await {
-            self.pending_inputs.lock().await.remove(&id);
             return Err(err);
         }
 
@@ -315,17 +390,14 @@ impl DaemonTcpClient {
             }
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_)) => Err(DaemonClientError::NotConnected),
-            Err(_) => {
-                self.pending_inputs.lock().await.remove(&id);
-                Err(DaemonClientError::InputTimeout)
-            }
+            Err(_) => Err(DaemonClientError::InputTimeout),
         }
     }
 
     async fn fail_pending_inputs(&self, err: DaemonClientError) {
-        let waiters: Vec<InputWaiter> = {
-            let mut guard = self.pending_inputs.lock().await;
-            guard.drain().map(|(_, tx)| tx).collect()
+        let waiters: Vec<InputWaiter> = match self.pending_inputs.lock() {
+            Ok(mut guard) => guard.drain().map(|(_, tx)| tx).collect(),
+            Err(poisoned) => poisoned.into_inner().drain().map(|(_, tx)| tx).collect(),
         };
         for tx in waiters {
             let err_clone = match &err {
@@ -544,7 +616,11 @@ impl DaemonTcpClient {
                         hello_update = Some(hello.clone());
                     }
                     WireMessage::InputResult(res) => {
-                        let waiter = self.pending_inputs.lock().await.remove(&res.id);
+                        let waiter = self
+                            .pending_inputs
+                            .lock()
+                            .ok()
+                            .and_then(|mut g| g.remove(&res.id));
                         if let Some(tx) = waiter {
                             let _ = tx.send(Ok(res.clone()));
                         }
