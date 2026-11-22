@@ -39,16 +39,16 @@ Rules:
 
 ## 3. Connecting Local / On-Device AI Clients
 
-1. Start the loopback-only HTTP/SSE MCP server (`127.0.0.1:8766`):
+1. Start the loopback-only HTTP/SSE MCP server (`127.0.0.1:8766`) using the native binary installed via `install.sh` / `install.ps1`:
    ```bash
-   npx droidpath mcp --http --port 8766
+   droidpath-mcp --http --port 8766
    ```
-2. Generate local AI configs, compact system prompt, and OpenAI function-calling tool schemas:
+2. Generate local AI configs, compact system prompt, and OpenAI function-calling tool schemas from a local clone (or after `npm --prefix packages/droidpath-cli link`):
    ```bash
-   npx droidpath init --client local,lm-studio
+   node packages/droidpath-cli/bin/droidpath.mjs init --client local,lm-studio
    # Or print directly to stdout:
-   npx droidpath rules --format prompt
-   npx droidpath rules --format openai
+   node packages/droidpath-cli/bin/droidpath.mjs rules --format prompt
+   node packages/droidpath-cli/bin/droidpath.mjs rules --format openai
    ```
 3. **LM Studio**: Automatically configured at `~/.lmstudio/mcp.json` (`--client lm-studio`).
 4. **Ollama / OpenWebUI / Custom OpenAI Agents**:

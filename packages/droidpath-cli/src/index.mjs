@@ -36,7 +36,7 @@ export function usageText() {
   return `droidpath v${CLI_VERSION} — Zero-Friction 1-Click Android Shadow DOM & MCP CLI
 
 USAGE:
-  npx droidpath [COMMAND] [OPTIONS]
+  droidpath [COMMAND] [OPTIONS]
 
 COMMANDS:
   start | up            1-click onboarding: auto-inject android-daemon.jar (adb push + forward + app_process)
@@ -316,7 +316,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
           io.out(`✅ Rules (${r.action}) -> ${r.filePath}`);
         }
         if (!flags.configure) {
-          io.out(`   Next: run \`npx droidpath init\` to auto-configure Cursor, Claude, Gemini, Antigravity & Local AI.`);
+          io.out(`   Next: run \`droidpath init\` to auto-configure Cursor, Claude, Gemini, Antigravity & Local AI.`);
         }
       }
       return 0;
@@ -594,7 +594,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
         io.out(`  ADB:           ${report.adb.found ? `✅ ${report.adb.path}` : "❌ Not found"}`);
         io.out(`  Devices:       ${devices.length > 0 ? `✅ ${devices.map((d) => `${d.model} (${d.serial})`).join(", ")}` : "⚠️ None attached"}`);
         io.out(`  Daemon JAR:    ${report.daemonJar.found ? `✅ ${report.daemonJar.path}` : "❌ Missing"}`);
-        io.out(`  Daemon :${flags.daemonPort}:  ${tcpReachable ? "✅ Reachable" : "⚠️ Offline (run `npx droidpath start`)"}`);
+        io.out(`  Daemon :${flags.daemonPort}:  ${tcpReachable ? "✅ Reachable" : "⚠️ Offline (run `droidpath start`)"}`);
         io.out(`  MCP Binary:    ${report.mcpBinary.found ? `✅ ${report.mcpBinary.path}` : "⚠️ Not installed (auto-downloads on first `mcp` run)"}`);
         io.out(`  Desktop HUD:   ${report.desktopHud.found ? `✅ ${report.desktopHud.path}` : "ℹ️ Optional (Tauri v2 app)"}`);
         io.out(`  Spatial Graph: ${report.spatialGraph.exists ? `✅ ${graphPath}` : `ℹ️ Will be created at ${graphPath}`}`);

@@ -173,7 +173,7 @@ export function configureMcpClient({
           transport: "sse",
           url: `http://127.0.0.1:${port}/sse`,
           messageUrl: `http://127.0.0.1:${port}/message`,
-          startCommand: `npx droidpath mcp --http --port ${port}`,
+          startCommand: `droidpath-mcp --http --port ${port}`,
         }
       : entry;
 
@@ -516,7 +516,7 @@ export function installLocalAiBundle({
         loopbackOnly: true,
         sseUrl: `http://127.0.0.1:${port}/sse`,
         messageUrl: `http://127.0.0.1:${port}/message`,
-        startCommand: `npx droidpath mcp --http --port ${port}`,
+        startCommand: `droidpath-mcp --http --port ${port}`,
       },
       tools: buildOpenAIToolSchemas(),
     },
