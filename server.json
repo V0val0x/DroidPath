@@ -3,7 +3,7 @@
   "name": "io.github.V0val0x/droidpath",
   "title": "DroidPath",
   "description": "Persistent A* UI router & Shadow DOM MCP server for autonomous Android control (Win/Linux/macOS)",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "websiteUrl": "https://github.com/V0val0x/DroidPath",
   "repository": {
     "url": "https://github.com/V0val0x/DroidPath",
@@ -22,7 +22,7 @@
         "x86_64-pc-windows-msvc",
         "aarch64-pc-windows-msvc"
       ],
-      "checksumsUrl": "https://github.com/V0val0x/DroidPath/releases/download/v2.2.1/checksums.txt",
+      "checksumsUrl": "https://github.com/V0val0x/DroidPath/releases/download/v2.3.0/checksums.txt",
       "installScripts": {
         "unix": "https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh",
         "windows": "https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1"

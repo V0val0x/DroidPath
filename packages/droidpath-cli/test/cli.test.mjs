@@ -295,12 +295,12 @@ test("runCli --version, --help, and doctor --json succeed cleanly", async () => 
   const io = { out: (s) => lines.push(s), err: () => {} };
 
   assert.equal(await runCli(["--version"], io), 0);
-  assert.match(lines[0], /droidpath 2\.2\.1/);
+  assert.match(lines[0], /droidpath 2\.3\.0/);
 
   lines.length = 0;
   assert.equal(await runCli(["doctor", "--json"], io), 0);
   const report = JSON.parse(lines.join("\n"));
-  assert.equal(report.cliVersion, "2.2.1");
+  assert.equal(report.cliVersion, "2.3.0");
   assert.equal(report.daemonJar.found, true);
 });
 

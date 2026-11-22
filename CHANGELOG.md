@@ -4,6 +4,19 @@ All notable changes to **DroidPath** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-11-22
+
+### Added
+- **Autonomous Agent Infrastructure Repositioning (`README.md`, `docs/integrations.md`):** Repositioned DroidPath as high-performance execution infrastructure for autonomous Android AI agents with ready-to-run guides for **MCP**, **LangChain**, **CrewAI**, **OpenAI Function Calling**, and **Anthropic SDK**.
+- **Standardized JSON Schema Exports (`schemas/` + `/schemas/*` HTTP + CLI `schemas`):** Single-source schema export from `DroidPathMcpServerCore::tool_definitions()` into OpenAI, Anthropic, and MCP formats via `droidpath-mcp schemas`, `droidpath schemas`, `GET /schemas/{openai,anthropic,mcp}.json`, and drift-checked static files under `schemas/` and `packages/droidpath-cli/assets/schemas/`.
+- **Opt-In Hybrid UI Tree + Vision Streaming (`include_vision: true`):** Added Kotlin daemon `UiAutomation.takeScreenshot()` JPEG compressor (`capture_vision`) and multimodal MCP `[text, image/jpeg]` tool output on `android_get_ui_tree` — strictly opt-in (`false` by default) and hard-blocked on `FLAG_SECURE` screens.
+- **Self-Correcting Agentic Failure Feedback Loop (`telemetry.rs` + `state.rs`):** On failed element lookups (`android_tap_element` / `android_explore_and_click`) or `PathDeviationError`, returns structured PII-redacted telemetry (`screen_delta`, newly appeared nodes, ranked `closest_candidates`, and `suggested_next_actions`) without calling `uiautomator dump` over a live Shadow DOM stream.
+- **Headless Docker-Android Fleet Support:** Added `--daemon-port 0` dynamic ephemeral port allocation, `--wait-boot` (`sys.boot_completed`), `UiAutomation.connect()` backoff retries, `ADB_SERVER_SOCKET` support, auth-gated `--bind-host` (`DROIDPATH_BIND_HOST` + `DROIDPATH_AUTH_TOKEN`), graceful `SIGTERM`, `docker-compose.headless.yml`, and `docs/headless-docker.md`.
+- **Live & Replay Agentic Benchmarks (`scripts/benchmark_agentic.mjs`, `docs/benchmarks.md`):** Verified live on unlocked Google Pixel 10a (`com.android.settings`, 54 nodes): `0.32 ms` steady-state Shadow DOM tree vs `2,423.9 ms` `adb uiautomator dump` (`7,575×` faster), `100%` (3/3) live E2E task success (`603 ms` Cold-Start / `561 ms` Warm A*), `452.33 ms` / `38.6 KB` Hybrid Vision JPEG vs `235.3 KB` raw PNG, and `$0.12` vs `$23.02` Pure Vision / `$88.20` XML per 1,000 tasks.
+
+### Fixed
+- **Shadow DOM Priority in `android_tap_element`:** Skips `adb shell uiautomator dump` fallback whenever live Shadow DOM is already fresh, preventing `exit 137` collisions and ensuring deterministic structured failure feedback on real hardware.
+
 ## [2.2.1] - 2026-11-22
 
 ### Added
