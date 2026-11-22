@@ -4,6 +4,15 @@ All notable changes to **DroidPath** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-11-22
+
+### Added
+- **MCP `ToolAnnotations` & 100% Schema Coverage:** Added `McpToolAnnotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) across all 9 MCP tools, documented every parameter with explicit coordinate units/constraints/defaults (`android_swipe` raised from 33% to 100%), removed internal jargon, and added explicit sibling usage guidance and return/error contracts.
+- **Glama Registry Container & GitHub Security Posture:** Added multi-stage `Dockerfile` and `.dockerignore`, Dependabot vulnerability/update configuration (`.github/dependabot.yml`), CodeQL static analysis workflow (`.github/workflows/codeql.yml`), and full GitHub Community Standards (`CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `ACCESSIBILITY.md`, issue & PR templates).
+
+### Fixed
+- **MCP `initialize` Protocol Negotiation:** Negotiates requested `protocolVersion` across `2024-11-05`, `2025-03-26`, and `2025-06-18` so both legacy and strict MCP 2025 inspectors complete handshake cleanly.
+
 ## [2.2.0] - 2026-11-22
 
 ### Added
