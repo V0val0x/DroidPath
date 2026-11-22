@@ -33,20 +33,20 @@ Traditional Android automation tools were built for brittle QA scripts, and pure
 
 ## Agentic Benchmark Summary
 
-Measured on real **Google Pixel 10a** hardware over USB ADB (`node scripts/benchmark_agentic.mjs --mode live --json`) and across 5 canonical 3–4 hop WebArena-style Android navigation tasks against compiled `target/release/droidpath-mcp`:
+Measured live over USB ADB on an unlocked **Google Pixel 10a (`com.android.settings`, 54 interactive nodes)** using `node scripts/benchmark_agentic.mjs --mode live --json` against compiled `target/release/droidpath-mcp`:
 
-**Live Hardware Probe (Google Pixel 10a over USB ADB):**
-- **DroidPath `android_get_ui_tree`:** **`0.23 ms`** steady-state (`46.4 ms` cold connect) · `1,593` bytes (`~399` tokens)
-- **`adb uiautomator dump` XML:** **`2,438.5 ms`** (`~10,600×` slower than steady-state Shadow DOM) · `5,252` bytes (`~1,313` tokens)
-- **DroidPath Hybrid Vision (`include_vision: true`, `540×1212` JPEG):** **`485.67 ms`** (`201 ms` daemon capture) vs **`565.4 ms`** `adb screencap -p` (raw PNG, no tree)
+**Live Pixel 10a Hardware Primitives & End-to-End Suite:**
+- **Shadow DOM Read Latency:** **`0.32 ms`** steady-state (`41.89 ms` cold connect) vs **`2,423.9 ms`** `adb uiautomator dump` (**7,575× faster** · `10.7 KB` vs `29.4 KB` XML)
+- **Live E2E Multi-Step Navigation (`Display`, `Battery`, `About phone`):** **`100%` success (3/3)** at **`603 ms` avg Cold-Start** (Seed Graph hydration) and **`561 ms` avg Warm A\***
+- **Opt-In Hybrid Vision (`include_vision: true`, `540×1212` JPEG q45 + 54 nodes):** **`452.33 ms` · `38.6 KB` JPEG** vs **`658.1 ms` · `235.3 KB` raw PNG** from `adb screencap -p` (**6.1× smaller payload**)
 
-**Multi-Step Navigation Suite (5 Tasks, Replay Mode):**
+**Multi-Step Architecture & Cost Comparison (`$3.00 / 1M` input tokens · Replay Model):**
 
-| Architecture | Avg LLM Calls / Task | Avg Tokens / Task | Avg Task Time | vs. Pure Vision |
-|---|---:|---:|---:|---|
-| **DroidPath (Shadow DOM + A\* Router)** | **1.0** | **39** *(warm A\*)* / **~1,135** *(cold tree)* | **464 ms** | **4.2× fewer calls · ~21× faster · >99% fewer tokens (warm)** |
-| **Pure Vision (Screenshots + VLM)** | 4.2 | 7,673 | 9,954 ms | Baseline |
-| **Appium / `uiautomator` XML** | 4.2 | 29,400 | 8,946 ms | 3.8× more tokens than Vision |
+| Architecture | Avg LLM Calls / Task | Avg Tokens / Task | Avg Task Time | Est. Cost / 1k Tasks | Live Success Rate |
+|---|---:|---:|---:|---:|---:|
+| **DroidPath (Shadow DOM + A\* Router)** | **1.0** | **39** *(warm A\*)* / **~1,135** *(cold tree)* | **464 ms** *(561 ms live)* | **$0.12** | **100% (3/3 live)** |
+| **Pure Vision (Screenshots + VLM)** | 4.2 | 7,673 | 9,954 ms | $23.02 *(192× higher)* | — |
+| **Appium / `uiautomator` XML** | 4.2 | 29,400 | 8,946 ms | $88.20 *(735× higher)* | — |
 
 Full hardware & replay methodology and reproduction commands are in [**docs/benchmarks.md**](docs/benchmarks.md).
 

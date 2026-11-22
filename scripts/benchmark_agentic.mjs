@@ -318,7 +318,7 @@ function startStdioMcpClient(mcpBin, args) {
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`RPC timeout for ${method}`));
-      }, 15000);
+      }, 25000);
       pending.set(id, {
         resolve: (msg) => {
           clearTimeout(timer);
@@ -422,10 +422,15 @@ async function runReplayBenchmark(mcpBin) {
     });
 
     const sum = (arr, fn) => arr.reduce((a, x) => a + fn(x), 0);
+    const usdPer1k = (avgTokens) => Number(((avgTokens * 1000 * 3.0) / 1_000_000).toFixed(2));
+    const dpAvgTokens = Math.round(sum(perTask, (t) => t.droidpath.tokens) / TASKS.length);
+    const visAvgTokens = Math.round(sum(perTask, (t) => t.pureVision.tokens) / TASKS.length);
+    const appAvgTokens = Math.round(sum(perTask, (t) => t.appiumXml.tokens) / TASKS.length);
     return {
       mode: "replay",
       timestamp: new Date().toISOString(),
       mcpBinary: path.relative(repoRoot, mcpBin),
+      costModel: "$3.00 / 1M input tokens (Claude Sonnet class API rate)",
       measuredLocalRpc: {
         graphStatsMs: Number(statsMs.toFixed(2)),
         toolsListMs: Number(toolsMs.toFixed(2)),
@@ -438,18 +443,21 @@ async function runReplayBenchmark(mcpBin) {
         taskCount: TASKS.length,
         droidpath: {
           avgLlmCalls: Number((sum(perTask, (t) => t.droidpath.llmCalls) / TASKS.length).toFixed(2)),
-          avgTokensPerTask: Math.round(sum(perTask, (t) => t.droidpath.tokens) / TASKS.length),
+          avgTokensPerTask: dpAvgTokens,
           avgTaskMs: Math.round(sum(perTask, (t) => t.droidpath.estimatedTotalMs) / TASKS.length),
+          costPer1kTasksUsd: usdPer1k(dpAvgTokens),
         },
         pureVision: {
           avgLlmCalls: Number((sum(perTask, (t) => t.pureVision.llmCalls) / TASKS.length).toFixed(2)),
-          avgTokensPerTask: Math.round(sum(perTask, (t) => t.pureVision.tokens) / TASKS.length),
+          avgTokensPerTask: visAvgTokens,
           avgTaskMs: Math.round(sum(perTask, (t) => t.pureVision.estimatedTotalMs) / TASKS.length),
+          costPer1kTasksUsd: usdPer1k(visAvgTokens),
         },
         appiumXml: {
           avgLlmCalls: Number((sum(perTask, (t) => t.appiumXml.llmCalls) / TASKS.length).toFixed(2)),
-          avgTokensPerTask: Math.round(sum(perTask, (t) => t.appiumXml.tokens) / TASKS.length),
+          avgTokensPerTask: appAvgTokens,
           avgTaskMs: Math.round(sum(perTask, (t) => t.appiumXml.estimatedTotalMs) / TASKS.length),
+          costPer1kTasksUsd: usdPer1k(appAvgTokens),
         },
       },
       tasks: perTask,
@@ -482,11 +490,39 @@ function detectLiveDevice() {
   return null;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function resetDeviceToSettings(serial) {
+  spawnSync("adb", ["-s", serial, "shell", "input", "keyevent", "224"], {
+    encoding: "utf8",
+    timeout: 4000,
+  });
+  spawnSync(
+    "adb",
+    [
+      "-s",
+      serial,
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.android.settings/.Settings",
+      "--activity-clear-task",
+    ],
+    { encoding: "utf8", timeout: 8000 }
+  );
+}
+
 async function runLiveDeviceProbe(device, mcpBin) {
   const daemonJar = resolveDaemonJar();
   const deployArgs = daemonJar
     ? ["deploy", "--serial", device.serial, "--daemon-jar", daemonJar]
     : ["deploy", "--serial", device.serial];
+
+  resetDeviceToSettings(device.serial);
+  await sleep(500);
+
   const deployRes = spawnSync(mcpBin, deployArgs, { encoding: "utf8", timeout: 20000 });
   if (deployRes.status !== 0) {
     throw new Error(`droidpath-mcp deploy failed on ${device.serial}: ${deployRes.stderr || deployRes.stdout}`);
@@ -507,6 +543,8 @@ async function runLiveDeviceProbe(device, mcpBin) {
     height: 0,
     nodeCount: 0,
   };
+  const liveTargets = ["Display", "Battery", "About phone"];
+  const liveTasks = [];
 
   const client = startStdioMcpClient(mcpBin, stdioArgs);
   try {
@@ -517,7 +555,7 @@ async function runLiveDeviceProbe(device, mcpBin) {
     });
 
     // First call connects to active TCP daemon and primes local Shadow DOM cache;
-    // second call measures steady-state <1ms Shadow DOM tree read.
+    // second call measures steady-state <1ms Shadow DOM tree read on unlocked Settings.
     const tFirst = performance.now();
     const firstResp = await client.rpc("tools/call", {
       name: "android_get_ui_tree",
@@ -581,13 +619,96 @@ async function runLiveDeviceProbe(device, mcpBin) {
       height: visMeta.height ?? 0,
       nodeCount: visNodeCount,
     };
+
+    // Live Multi-Step Navigation Suite: Cold-Start explore+hydrate -> Warm A* replay
+    for (const target of liveTargets) {
+      resetDeviceToSettings(device.serial);
+      await sleep(700);
+      await client.rpc("tools/call", {
+        name: "android_get_ui_tree",
+        arguments: { device_serial: device.serial },
+      });
+
+      const tCold = performance.now();
+      const coldResp = await client.rpc("tools/call", {
+        name: "android_navigate_to_node",
+        arguments: {
+          target,
+          auto_explore: true,
+          max_steps: 10,
+          step_timeout_ms: 2000,
+          device_serial: device.serial,
+        },
+      });
+      const coldMs = Number((performance.now() - tCold).toFixed(1));
+      let coldBody = {};
+      try {
+        coldBody = JSON.parse(coldResp?.result?.content?.[0]?.text ?? "{}");
+      } catch {}
+      const coldStatus = coldBody.status ?? (coldResp?.result?.isError ? "error" : "unknown");
+      const coldOk = !coldResp?.result?.isError && ["explored_and_clicked", "arrived", "arrived_via_graph", "already_at_target"].includes(coldStatus);
+
+      // Now reset back to Settings root and run Warm A* replay
+      resetDeviceToSettings(device.serial);
+      await sleep(700);
+      await client.rpc("tools/call", {
+        name: "android_get_ui_tree",
+        arguments: { device_serial: device.serial },
+      });
+
+      const tWarmNav = performance.now();
+      const warmNavResp = await client.rpc("tools/call", {
+        name: "android_navigate_to_node",
+        arguments: {
+          target,
+          auto_explore: true,
+          max_steps: 10,
+          step_timeout_ms: 2000,
+          device_serial: device.serial,
+        },
+      });
+      const warmNavMs = Number((performance.now() - tWarmNav).toFixed(1));
+      let warmBody = {};
+      try {
+        warmBody = JSON.parse(warmNavResp?.result?.content?.[0]?.text ?? "{}");
+      } catch {}
+      const warmStatus = warmBody.status ?? (warmNavResp?.result?.isError ? "error" : "unknown");
+      const warmOk = !warmNavResp?.result?.isError && ["arrived", "arrived_via_graph", "explored_and_clicked", "already_at_target"].includes(warmStatus);
+
+      liveTasks.push({
+        target,
+        coldMs,
+        coldStatus,
+        coldOk,
+        scrollsPerformed: coldBody.scrolls_performed ?? null,
+        warmMs: warmNavMs,
+        warmStatus,
+        warmOk,
+        stepsExecuted: warmBody.steps_executed ?? null,
+      });
+    }
   } finally {
     client.close();
     rmSync(tmpDir, { recursive: true, force: true });
   }
 
+  const coldSuccessCount = liveTasks.filter((t) => t.coldOk).length;
+  const warmSuccessCount = liveTasks.filter((t) => t.warmOk).length;
+  const avgColdMs = liveTasks.length ? Math.round(liveTasks.reduce((a, t) => a + t.coldMs, 0) / liveTasks.length) : 0;
+  const avgWarmMs = liveTasks.length ? Math.round(liveTasks.reduce((a, t) => a + t.warmMs, 0) / liveTasks.length) : 0;
+  const liveE2eTasks = {
+    tasks: liveTasks,
+    coldSuccessRatePct: Math.round((coldSuccessCount * 100) / Math.max(1, liveTasks.length)),
+    warmSuccessRatePct: Math.round((warmSuccessCount * 100) / Math.max(1, liveTasks.length)),
+    avgColdMs,
+    avgWarmMs,
+  };
+
   // Stop daemon cleanly before measuring `uiautomator dump` (Android allows one UiAutomation client at a time)
+  // and reset back to the exact same Settings root screen for an apples-to-apples comparison.
   spawnSync(mcpBin, ["stop-daemon", "--serial", device.serial], { encoding: "utf8", timeout: 10000 });
+  resetDeviceToSettings(device.serial);
+  await sleep(600);
 
   const measureCmd = (args, validate = () => true) => {
     const t0 = performance.now();
@@ -621,6 +742,7 @@ async function runLiveDeviceProbe(device, mcpBin) {
     device,
     droidpathUiTree,
     droidpathHybridVision,
+    liveE2eTasks,
     screencap,
     xmlDump,
   };
@@ -672,6 +794,16 @@ async function main() {
     );
     console.log(`    ADB screencap -p:   ${p.screencap.ms} ms · ${p.screencap.bytes} bytes (PNG)`);
     console.log(`    ADB uiautomator:    ${p.xmlDump.ms} ms · ${p.xmlDump.bytes} bytes (~${p.xmlDump.approxTokens} tokens XML)`);
+    if (p.liveE2eTasks) {
+      console.log(
+        `    Live E2E Suite:     Cold ${p.liveE2eTasks.coldSuccessRatePct}% (${p.liveE2eTasks.avgColdMs} ms avg) · Warm A* ${p.liveE2eTasks.warmSuccessRatePct}% (${p.liveE2eTasks.avgWarmMs} ms avg)`
+      );
+      for (const t of p.liveE2eTasks.tasks) {
+        console.log(
+          `      - ${t.target}: cold ${t.coldMs} ms (${t.coldStatus}), warm ${t.warmMs} ms (${t.warmStatus})`
+        );
+      }
+    }
   } else {
     console.log("  Live Device:      none attached during this run (connect USB/Wi-Fi ADB and run with --mode live)");
   }
