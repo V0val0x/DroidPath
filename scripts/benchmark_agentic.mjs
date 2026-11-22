@@ -288,19 +288,8 @@ async function startMockDaemon() {
   };
 }
 
-async function runReplayBenchmark() {
-  const mcpBin = resolveMcpBinary();
-  if (!mcpBin) {
-    throw new Error(
-      "Compiled droidpath-mcp binary not found in target/debug or target/release. Run `cargo build -p droidpath-mcp` first."
-    );
-  }
-
-  const daemon = await startMockDaemon();
-  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-bench-"));
-  const graphPath = path.join(tmpDir, "bench_graph.json");
-
-  const proc = spawn(mcpBin, ["--stdio", "--daemon-port", String(daemon.port), "--graph-path", graphPath], {
+function startStdioMcpClient(mcpBin, args) {
+  const proc = spawn(mcpBin, args, {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -329,7 +318,7 @@ async function runReplayBenchmark() {
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`RPC timeout for ${method}`));
-      }, 8000);
+      }, 15000);
       pending.set(id, {
         resolve: (msg) => {
           clearTimeout(timer);
@@ -338,6 +327,31 @@ async function runReplayBenchmark() {
       });
       proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
+
+  return {
+    proc,
+    rpc,
+    close: () => {
+      try {
+        proc.stdin.end();
+      } catch {}
+      proc.kill("SIGTERM");
+    },
+  };
+}
+
+async function runReplayBenchmark(mcpBin) {
+  const daemon = await startMockDaemon();
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-bench-"));
+  const graphPath = path.join(tmpDir, "bench_graph.json");
+
+  const { rpc, close } = startStdioMcpClient(mcpBin, [
+    "--stdio",
+    "--daemon-port",
+    String(daemon.port),
+    "--graph-path",
+    graphPath,
+  ]);
 
   try {
     await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "bench", version: "1.0" } });
@@ -441,10 +455,18 @@ async function runReplayBenchmark() {
       tasks: perTask,
     };
   } finally {
-    proc.kill("SIGTERM");
+    close();
     await daemon.close();
     rmSync(tmpDir, { recursive: true, force: true });
   }
+}
+
+function resolveDaemonJar() {
+  const candidates = [
+    path.join(repoRoot, "packages", "droidpath-cli", "assets", "android-daemon.jar"),
+    path.join(repoRoot, "target", "android-daemon", "android-daemon.jar"),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? null;
 }
 
 function detectLiveDevice() {
@@ -460,17 +482,145 @@ function detectLiveDevice() {
   return null;
 }
 
-async function runLiveDeviceProbe(device) {
-  const measureCmd = (args) => {
-    const t0 = performance.now();
-    const res = spawnSync("adb", ["-s", device.serial, ...args], { maxBuffer: 20 * 1024 * 1024, timeout: 10000 });
-    const ms = performance.now() - t0;
-    return { ok: res.status === 0, ms: Number(ms.toFixed(1)), bytes: res.stdout ? res.stdout.length : 0 };
+async function runLiveDeviceProbe(device, mcpBin) {
+  const daemonJar = resolveDaemonJar();
+  const deployArgs = daemonJar
+    ? ["deploy", "--serial", device.serial, "--daemon-jar", daemonJar]
+    : ["deploy", "--serial", device.serial];
+  const deployRes = spawnSync(mcpBin, deployArgs, { encoding: "utf8", timeout: 20000 });
+  if (deployRes.status !== 0) {
+    throw new Error(`droidpath-mcp deploy failed on ${device.serial}: ${deployRes.stderr || deployRes.stdout}`);
+  }
+
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-live-bench-"));
+  const graphPath = path.join(tmpDir, "live_graph.json");
+  const stdioArgs = ["--stdio", "--graph-path", graphPath];
+  if (daemonJar) stdioArgs.push("--daemon-jar", daemonJar);
+
+  let droidpathUiTree = { ok: false, firstConnectMs: 0, ms: 0, bytes: 0, nodeCount: 0, approxTokens: 0 };
+  let droidpathHybridVision = {
+    ok: false,
+    ms: 0,
+    jpegBytes: 0,
+    base64Chars: 0,
+    width: 0,
+    height: 0,
+    nodeCount: 0,
   };
-  const screencap = measureCmd(["exec-out", "screencap", "-p"]);
-  const xmlDump = measureCmd(["exec-out", "uiautomator", "dump", "/dev/tty"]);
+
+  const client = startStdioMcpClient(mcpBin, stdioArgs);
+  try {
+    await client.rpc("initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "live-bench", version: "1.0" },
+    });
+
+    // First call connects to active TCP daemon and primes local Shadow DOM cache;
+    // second call measures steady-state <1ms Shadow DOM tree read.
+    const tFirst = performance.now();
+    const firstResp = await client.rpc("tools/call", {
+      name: "android_get_ui_tree",
+      arguments: { device_serial: device.serial },
+    });
+    const firstConnectMs = Number((performance.now() - tFirst).toFixed(2));
+
+    const tWarm = performance.now();
+    const warmResp = await client.rpc("tools/call", {
+      name: "android_get_ui_tree",
+      arguments: { device_serial: device.serial },
+    });
+    const warmMs = Number((performance.now() - tWarm).toFixed(2));
+
+    const treeText = warmResp?.result?.content?.[0]?.text ?? firstResp?.result?.content?.[0]?.text ?? "[]";
+    const parsedNodes = (() => {
+      try {
+        const parsed = JSON.parse(treeText);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })();
+    droidpathUiTree = {
+      ok: !warmResp?.result?.isError && parsedNodes.length > 0,
+      firstConnectMs,
+      ms: warmMs,
+      bytes: Buffer.byteLength(treeText, "utf8"),
+      nodeCount: parsedNodes.length,
+      approxTokens: estimateTextTokens(treeText),
+    };
+
+    const tVis = performance.now();
+    const visResp = await client.rpc("tools/call", {
+      name: "android_get_ui_tree",
+      arguments: {
+        device_serial: device.serial,
+        include_vision: true,
+        vision_max_width: 540,
+        vision_quality: 45,
+      },
+    });
+    const visMs = Number((performance.now() - tVis).toFixed(2));
+    const visBlocks = visResp?.result?.content ?? [];
+    let visMeta = {};
+    let visNodeCount = 0;
+    try {
+      const parsedVis = JSON.parse(visBlocks[0]?.text ?? "{}");
+      visMeta = parsedVis.vision ?? {};
+      visNodeCount = Array.isArray(parsedVis.nodes) ? parsedVis.nodes.length : 0;
+    } catch {}
+    const imgBlock = visBlocks.find((b) => b.type === "image");
+    const b64 = imgBlock?.data ?? "";
+    const jpegBytes = b64 ? Buffer.from(b64, "base64").length : 0;
+    droidpathHybridVision = {
+      ok: !visResp?.result?.isError && Boolean(imgBlock) && jpegBytes > 0,
+      ms: visMs,
+      jpegBytes,
+      base64Chars: b64.length,
+      width: visMeta.width ?? 0,
+      height: visMeta.height ?? 0,
+      nodeCount: visNodeCount,
+    };
+  } finally {
+    client.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  // Stop daemon cleanly before measuring `uiautomator dump` (Android allows one UiAutomation client at a time)
+  spawnSync(mcpBin, ["stop-daemon", "--serial", device.serial], { encoding: "utf8", timeout: 10000 });
+
+  const measureCmd = (args, validate = () => true) => {
+    const t0 = performance.now();
+    const res = spawnSync("adb", ["-s", device.serial, ...args], {
+      maxBuffer: 25 * 1024 * 1024,
+      timeout: 15000,
+    });
+    const ms = Number((performance.now() - t0).toFixed(1));
+    const outBuf = res.stdout ?? Buffer.alloc(0);
+    return {
+      ok: res.status === 0 && validate(outBuf),
+      ms,
+      bytes: outBuf.length,
+    };
+  };
+
+  const screencap = measureCmd(["exec-out", "screencap", "-p"], (buf) => buf.length > 100);
+  const xmlDumpRaw = measureCmd(
+    ["exec-out", "uiautomator", "dump", "/dev/tty"],
+    (buf) => buf.toString("utf8").includes("<hierarchy")
+  );
+  const xmlDump = {
+    ...xmlDumpRaw,
+    approxTokens: Math.ceil(xmlDumpRaw.bytes / 4),
+  };
+
+  // Re-deploy daemon so the device stays ready after the benchmark
+  spawnSync(mcpBin, deployArgs, { encoding: "utf8", timeout: 20000 });
+
   return {
     device,
+    droidpathUiTree,
+    droidpathHybridVision,
     screencap,
     xmlDump,
   };
@@ -482,15 +632,23 @@ async function main() {
   const modeIdx = args.indexOf("--mode");
   const requestedMode = modeIdx >= 0 ? args[modeIdx + 1] : "auto";
 
+  const mcpBin = resolveMcpBinary();
+  if (!mcpBin) {
+    throw new Error(
+      "Compiled droidpath-mcp binary not found in target/debug or target/release. Run `cargo build -p droidpath-mcp` first."
+    );
+  }
+
   const liveDevice = detectLiveDevice();
-  const report = await runReplayBenchmark();
+  const report = await runReplayBenchmark(mcpBin);
 
   if (requestedMode === "live" && !liveDevice) {
     console.error("ERROR: --mode live requested, but no authorized ADB device is attached (`adb devices -l` is empty).");
     process.exit(1);
   }
   if ((requestedMode === "live" || requestedMode === "auto") && liveDevice) {
-    report.liveDeviceProbe = await runLiveDeviceProbe(liveDevice);
+    report.mode = "live+replay";
+    report.liveDeviceProbe = await runLiveDeviceProbe(liveDevice, mcpBin);
   }
 
   if (wantJson) {
@@ -499,15 +657,21 @@ async function main() {
   }
 
   console.log(`DroidPath Agentic Benchmark (${report.mode.toUpperCase()} mode)`);
-  console.log(`  MCP Binary:       ${report.mcpBinary}`);
-  console.log(`  tools/list RPC:   ${report.measuredLocalRpc.toolsListMs} ms (${report.measuredLocalRpc.toolCount} tools)`);
-  console.log(`  graph_stats RPC:  ${report.measuredLocalRpc.graphStatsMs} ms`);
-  console.log(`  Compact UI Tree:  ${report.measuredLocalRpc.compactTreeBytes} bytes (~${report.measuredLocalRpc.compactTreeTokens} tokens)`);
+  console.log(`  MCP Binary:           ${report.mcpBinary}`);
+  console.log(`  tools/list RPC:       ${report.measuredLocalRpc.toolsListMs} ms (${report.measuredLocalRpc.toolCount} tools)`);
+  console.log(`  graph_stats RPC:      ${report.measuredLocalRpc.graphStatsMs} ms`);
+  console.log(`  Mock Compact Tree:    ${report.measuredLocalRpc.compactTreeBytes} bytes (~${report.measuredLocalRpc.compactTreeTokens} tokens)`);
   if (report.liveDeviceProbe) {
     const p = report.liveDeviceProbe;
-    console.log(`  Live Device:      ${p.device.model} (${p.device.serial})`);
-    console.log(`    screencap -p:   ${p.screencap.ms} ms (${p.screencap.bytes} bytes)`);
-    console.log(`    uiautomator:    ${p.xmlDump.ms} ms (${p.xmlDump.bytes} bytes)`);
+    console.log(`  Live Device:          ${p.device.model} (${p.device.serial})`);
+    console.log(
+      `    DroidPath UI Tree:  ${p.droidpathUiTree.ms} ms steady (${p.droidpathUiTree.firstConnectMs} ms cold connect) · ${p.droidpathUiTree.nodeCount} nodes · ${p.droidpathUiTree.bytes} bytes (~${p.droidpathUiTree.approxTokens} tokens)`
+    );
+    console.log(
+      `    Hybrid Vision JPEG: ${p.droidpathHybridVision.ms} ms · ${p.droidpathHybridVision.width}x${p.droidpathHybridVision.height} · ${p.droidpathHybridVision.jpegBytes} bytes (${p.droidpathHybridVision.nodeCount} nodes)`
+    );
+    console.log(`    ADB screencap -p:   ${p.screencap.ms} ms · ${p.screencap.bytes} bytes (PNG)`);
+    console.log(`    ADB uiautomator:    ${p.xmlDump.ms} ms · ${p.xmlDump.bytes} bytes (~${p.xmlDump.approxTokens} tokens XML)`);
   } else {
     console.log("  Live Device:      none attached during this run (connect USB/Wi-Fi ADB and run with --mode live)");
   }

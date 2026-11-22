@@ -466,3 +466,57 @@ async fn test_http_bind_host_loopback_default_and_auth_gated_container_bind() {
     assert!(http.bound_addr().await.is_none());
     assert_eq!(http.port().await, 0);
 }
+
+#[tokio::test]
+async fn test_tap_element_returns_feedback_when_shadow_dom_fresh_without_uiautomator_fallback() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(
+                b"{\"type\":\"hello\",\"protocol_version\":1,\"format\":\"ndjson/1\",\"sdk_int\":34,\"device_model\":\"Pixel\",\"pid\":100,\"capabilities\":[\"input\",\"hybrid_vision\"]}\n",
+            )
+            .await
+            .unwrap();
+        writer
+            .write_all(
+                b"{\"type\":\"snapshot\",\"seq\":1,\"ts_ms\":1000,\"reason\":\"initial\",\"package\":\"com.android.settings\",\"window_id\":1,\"secure_screen\":false,\"node_count\":1,\"nodes\":[{\"index\":0,\"text\":\"Display\",\"resource_id\":\"com.android.settings:id/title\",\"content_desc\":\"\",\"class\":\"TextView\",\"clickable\":true,\"scrollable\":false,\"bounds\":\"[0,100][1080,220]\",\"center_x\":540,\"center_y\":160,\"node_id\":1,\"parent_id\":null,\"window_id\":1,\"child_index\":0,\"depth\":1,\"package_name\":\"com.android.settings\",\"editable\":false,\"focused\":false,\"checked\":false,\"enabled\":true,\"visible\":true}]}\n",
+            )
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
+
+    let tmp = std::env::temp_dir().join(format!(
+        "droidpath_tap_fb_test_{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let manager = DroidPathManager::new(port, tmp, None, DroidPathAdbRunner::default(), None, None);
+    manager.ensure_started(Some("mock-serial"), false).await;
+    assert!(manager.bridge.ensure_shadow_stream_ready(2.0, 15.0).await);
+
+    let core = DroidPathMcpServerCore::new(Arc::clone(&manager));
+    let mut args = Map::new();
+    args.insert("device_serial".to_string(), json!("mock-serial"));
+    args.insert("text".to_string(), json!("__nonexistent_button__"));
+
+    let res = core.execute_tool("android_tap_element", &args).await;
+    assert!(res.is_error);
+    let payload: Value = serde_json::from_str(&res.text).expect("structured json feedback");
+    assert_eq!(payload["status"], json!("element_not_found"));
+    assert_eq!(
+        payload["feedback"]["failure_code"],
+        json!("element_not_found")
+    );
+    assert_eq!(
+        payload["feedback"]["closest_candidates"][0]["label"],
+        json!("Display")
+    );
+
+    manager.stop().await;
+    server_task.abort();
+}

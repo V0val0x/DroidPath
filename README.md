@@ -33,7 +33,14 @@ Traditional Android automation tools were built for brittle QA scripts, and pure
 
 ## Agentic Benchmark Summary
 
-Measured across 5 canonical 3–4 hop WebArena-style Android navigation tasks using `node scripts/benchmark_agentic.mjs` against compiled `target/release/droidpath-mcp` *(replay suite; run `--mode live` to append live USB/Wi-Fi `screencap` & `uiautomator` device timings)*:
+Measured on real **Google Pixel 10a** hardware over USB ADB (`node scripts/benchmark_agentic.mjs --mode live --json`) and across 5 canonical 3–4 hop WebArena-style Android navigation tasks against compiled `target/release/droidpath-mcp`:
+
+**Live Hardware Probe (Google Pixel 10a over USB ADB):**
+- **DroidPath `android_get_ui_tree`:** **`0.23 ms`** steady-state (`46.4 ms` cold connect) · `1,593` bytes (`~399` tokens)
+- **`adb uiautomator dump` XML:** **`2,438.5 ms`** (`~10,600×` slower than steady-state Shadow DOM) · `5,252` bytes (`~1,313` tokens)
+- **DroidPath Hybrid Vision (`include_vision: true`, `540×1212` JPEG):** **`485.67 ms`** (`201 ms` daemon capture) vs **`565.4 ms`** `adb screencap -p` (raw PNG, no tree)
+
+**Multi-Step Navigation Suite (5 Tasks, Replay Mode):**
 
 | Architecture | Avg LLM Calls / Task | Avg Tokens / Task | Avg Task Time | vs. Pure Vision |
 |---|---:|---:|---:|---|
@@ -41,7 +48,7 @@ Measured across 5 canonical 3–4 hop WebArena-style Android navigation tasks us
 | **Pure Vision (Screenshots + VLM)** | 4.2 | 7,673 | 9,954 ms | Baseline |
 | **Appium / `uiautomator` XML** | 4.2 | 29,400 | 8,946 ms | 3.8× more tokens than Vision |
 
-Full methodology, local MCP RPC micro-benchmarks (`0.23 ms` `tools/list`, `0.25 ms` `android_graph_stats`), and reproduction commands are in [**docs/benchmarks.md**](docs/benchmarks.md).
+Full hardware & replay methodology and reproduction commands are in [**docs/benchmarks.md**](docs/benchmarks.md).
 
 ---
 

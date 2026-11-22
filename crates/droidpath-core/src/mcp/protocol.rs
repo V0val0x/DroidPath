@@ -911,13 +911,16 @@ impl DroidPathMcpServerCore {
 
                 self.manager.ensure_started(Some(&serial), false).await;
                 let pre_index = self.manager.bridge.dom_state.current_index().await;
-                if !self.manager.bridge.ensure_shadow_stream_ready(0.8, 15.0).await {
+                let mut shadow_ready = self.manager.bridge.ensure_shadow_stream_ready(0.8, 15.0).await;
+                if !shadow_ready {
                     let port = self.manager.bridge.client.configuration().port;
-                    if port > 0 {
-                        let _ = self
+                    if port > 0
+                        && self
                             .manager
                             .recover_daemon_and_await_stream(&serial, port)
-                            .await;
+                            .await
+                    {
+                        shadow_ready = self.manager.bridge.dom_state.is_fresh(15.0).await;
                     }
                 }
                 let mut resolved: Option<ShadowCompactNode> = None;
@@ -940,7 +943,10 @@ impl DroidPathMcpServerCore {
                     resolved = Self::find_matching_compact(&live_nodes, text_q, id_q, desc_q);
                 }
 
-                if resolved.is_none() {
+                // Only fall back to `uiautomator dump` when the Shadow DOM stream is cold/unavailable;
+                // invoking `uiautomator` while the daemon holds UiAutomation fails with exit 137 on Android
+                // and would abort before structured `element_not_found` feedback is emitted.
+                if resolved.is_none() && !shadow_ready {
                     let xml = self.fetch_fallback_ui_xml(&serial).await?;
                     let nodes = DroidPathUITreeFallbackParser::parse(&xml);
                     resolved = Self::find_matching_compact(&nodes, text_q, id_q, desc_q);
