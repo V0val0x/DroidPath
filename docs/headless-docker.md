@@ -12,7 +12,7 @@ DroidPath v2.3+ supports running autonomous Android AI agent fleets inside headl
    - Both `droidpath-core` (Rust) and `droidpath-cli` (Node) honor `ADB_SERVER_SOCKET` (and `DROIDPATH_ADB_SERVER_SOCKET`), allowing containers to talk to a shared host or sidecar ADB server (e.g., `tcp:host.docker.internal:5037` or `tcp:android-emulator-1:5037`).
 4. **Auth-Gated Container Bind (`--bind-host` / `DROIDPATH_BIND_HOST`)**
    - `droidpath-mcp --http` binds strict `127.0.0.1` loopback by default.
-   - Inside Docker bridge networks (where host `127.0.0.1:8766:8766` forwards to the container bridge IP), explicitly pass `--bind-host 0.0.0.0` (or set `DROIDPATH_BIND_HOST=0.0.0.0`) together with `--auth-token <secret>`. Non-loopback binds are refused unless a non-empty `--auth-token` is provided.
+   - Inside Docker bridge networks (where host `127.0.0.1:8766:8766` forwards to the container bridge IP), explicitly pass `--bind-host 0.0.0.0` (or set `DROIDPATH_BIND_HOST=0.0.0.0`) together with `--auth-token <secret>` (or `DROIDPATH_AUTH_TOKEN=<secret>`). Non-loopback binds are refused unless a non-empty auth token is provided.
 5. **Graceful `SIGTERM` Shutdown**
    - `droidpath-mcp --http` traps both `SIGINT` and `SIGTERM`, cleanly flushing `shadow_graph.json` and tearing down TCP streams before container exit.
    - `android-daemon` detaches cleanly via `UiAutomation.disconnect()` on shutdown hooks.

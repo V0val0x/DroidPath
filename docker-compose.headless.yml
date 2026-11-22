@@ -32,10 +32,12 @@ services:
       DROIDPATH_HEADLESS: "1"
       # Connect to the emulator container's ADB daemon over Docker internal networking:
       ADB_SERVER_SOCKET: "tcp:android-emulator-1:5037"
+      # Bearer token read by droidpath-mcp and the container healthcheck (avoids leaking secret in argv):
+      DROIDPATH_AUTH_TOKEN: "${DROIDPATH_AUTH_TOKEN:-changeme-local-token}"
     command:
       - "--http"
       # Bind all container interfaces so Docker bridge port-forwarding (127.0.0.1:8766:8766)
-      # reaches the server; non-loopback binds strictly require --auth-token.
+      # reaches the server; non-loopback binds strictly require --auth-token / DROIDPATH_AUTH_TOKEN.
       - "--bind-host"
       - "0.0.0.0"
       - "--port"
@@ -47,8 +49,6 @@ services:
       - "/data/shadow_graph.json"
       - "--daemon-jar"
       - "/usr/local/share/droidpath/android-daemon.jar"
-      - "--auth-token"
-      - "${DROIDPATH_AUTH_TOKEN:-changeme-local-token}"
     ports:
       - "127.0.0.1:8766:8766"
     volumes:
@@ -56,7 +56,7 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 10s
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -H 'Authorization: Bearer ${DROIDPATH_AUTH_TOKEN:-changeme-local-token}' http://127.0.0.1:8766/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$DROIDPATH_AUTH_TOKEN\" http://127.0.0.1:8766/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5

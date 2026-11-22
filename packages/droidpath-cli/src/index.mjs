@@ -68,6 +68,7 @@ OPTIONS:
   --out <path>          Write exported JSON schemas to a file instead of stdout
   --http                Use HTTP/SSE transport instead of stdio
   --stdio               Use stdio JSON-RPC transport (default for mcp)
+  --bind-host <addr>    HTTP/SSE bind address; non-loopback requires --auth-token (default: 127.0.0.1)
   --port <port>         HTTP/SSE listen port (default: 8766)
   --auth-token <token>  Optional Bearer token for HTTP/SSE MCP server
   --graph-path <path>   Custom Spatial Graph JSON path (default: ~/.droidpath/shadow_graph.json)
@@ -86,6 +87,7 @@ export function parseCliArgs(argv) {
   const flags = {
     serial: null,
     daemonPort: 27189,
+    bindHost: null,
     port: 8766,
     jar: null,
     authToken: null,
@@ -138,6 +140,14 @@ export function parseCliArgs(argv) {
           throw new Error("Invalid value for --daemon-port (expected 0-65535).");
         }
         flags.daemonPort = parsed;
+        break;
+      }
+      case "--bind-host": {
+        const val = requireFlagValue("--bind-host", ++i).trim();
+        if (!val) {
+          throw new Error("Invalid value for --bind-host (must not be empty).");
+        }
+        flags.bindHost = val;
         break;
       }
       case "--port": {
@@ -600,7 +610,10 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       }
 
       const childArgs = [flags.http ? "--http" : "--stdio"];
-      if (flags.http) childArgs.push("--port", String(flags.port));
+      if (flags.http) {
+        if (flags.bindHost) childArgs.push("--bind-host", flags.bindHost);
+        childArgs.push("--port", String(flags.port));
+      }
       childArgs.push("--daemon-port", String(effectiveDaemonPort));
       if (jarPath) childArgs.push("--daemon-jar", jarPath);
       if (flags.authToken) childArgs.push("--auth-token", flags.authToken);

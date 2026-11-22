@@ -1320,4 +1320,11 @@ test("headless allocateEphemeralPort and deployDaemon(port: 0, headless: true) w
   assert.equal(uiTree.function.parameters.properties.include_vision.default, false);
   assert.equal(uiTree.function.parameters.properties.vision_max_width.default, 540);
   assert.equal(uiTree.function.parameters.properties.vision_quality.default, 50);
+
+  // Verify --bind-host parsing in Node CLI
+  const parsedBind = parseCliArgs(["mcp", "--http", "--bind-host", "0.0.0.0", "--auth-token", "tok"]);
+  assert.equal(parsedBind.flags.http, true);
+  assert.equal(parsedBind.flags.bindHost, "0.0.0.0");
+  assert.equal(parsedBind.flags.authToken, "tok");
+  assert.throws(() => parseCliArgs(["mcp", "--http", "--bind-host", "   "]), /--bind-host/);
 });

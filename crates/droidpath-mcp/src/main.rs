@@ -81,7 +81,7 @@ OPTIONS:
   --serial <serial>       Target ADB device serial (for deploy / stop-daemon)
   --graph-path <path>     Spatial Graph JSON persistence path (default: ~/.droidpath/shadow_graph.json)
   --daemon-jar <path>     Path to single-DEX android-daemon.jar
-  --auth-token <token>    Optional Bearer token required on HTTP/SSE requests (mandatory for non-loopback --bind-host)
+  --auth-token <token>    Optional Bearer token for HTTP/SSE requests (mandatory for non-loopback --bind-host; or DROIDPATH_AUTH_TOKEN)
   -v, --version           Print version
   -h, --help              Show this help
 "#,
@@ -91,15 +91,24 @@ OPTIONS:
 
 fn parse_args(args: &[String]) -> Result<CliConfig, String> {
     let env_bind_host = std::env::var("DROIDPATH_BIND_HOST").ok();
-    parse_args_with_env(args, env_bind_host.as_deref())
+    let env_auth_token = std::env::var("DROIDPATH_AUTH_TOKEN").ok();
+    parse_args_with_env(args, env_bind_host.as_deref(), env_auth_token.as_deref())
 }
 
-fn parse_args_with_env(args: &[String], env_bind_host: Option<&str>) -> Result<CliConfig, String> {
+fn parse_args_with_env(
+    args: &[String],
+    env_bind_host: Option<&str>,
+    env_auth_token: Option<&str>,
+) -> Result<CliConfig, String> {
     let default_bind_host = env_bind_host
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("127.0.0.1")
         .to_string();
+    let default_auth_token = env_auth_token
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
 
     let mut cfg = CliConfig {
         mode: CommandMode::Stdio,
@@ -108,7 +117,7 @@ fn parse_args_with_env(args: &[String], env_bind_host: Option<&str>) -> Result<C
         daemon_port: 27189,
         graph_path: DroidPathPersistenceCoordinator::default_storage_path(),
         daemon_jar_path: None,
-        auth_token: None,
+        auth_token: default_auth_token,
     };
 
     let mut serial: Option<String> = None;
@@ -483,29 +492,54 @@ mod tests {
 
     #[test]
     fn default_bind_host_is_loopback() {
-        let cfg = parse_args_with_env(&vec_args(&["droidpath-mcp", "--http"]), None).unwrap();
+        let cfg = parse_args_with_env(&vec_args(&["droidpath-mcp", "--http"]), None, None).unwrap();
         assert_eq!(cfg.bind_host, "127.0.0.1");
+        assert!(cfg.auth_token.is_none());
         assert!(matches!(cfg.mode, CommandMode::Http));
     }
 
     #[test]
-    fn env_bind_host_is_honored_and_overridden_by_cli_flag() {
-        let from_env =
-            parse_args_with_env(&vec_args(&["droidpath-mcp", "--http"]), Some("0.0.0.0")).unwrap();
+    fn env_bind_host_and_auth_token_are_honored_and_overridden_by_cli_flags() {
+        let from_env = parse_args_with_env(
+            &vec_args(&["droidpath-mcp", "--http"]),
+            Some("0.0.0.0"),
+            Some("env-secret"),
+        )
+        .unwrap();
         assert_eq!(from_env.bind_host, "0.0.0.0");
+        assert_eq!(from_env.auth_token.as_deref(), Some("env-secret"));
+
+        let blank_env = parse_args_with_env(
+            &vec_args(&["droidpath-mcp", "--http"]),
+            Some("   "),
+            Some("   "),
+        )
+        .unwrap();
+        assert_eq!(blank_env.bind_host, "127.0.0.1");
+        assert!(blank_env.auth_token.is_none());
 
         let overridden = parse_args_with_env(
-            &vec_args(&["droidpath-mcp", "--http", "--bind-host", "127.0.0.1"]),
+            &vec_args(&[
+                "droidpath-mcp",
+                "--http",
+                "--bind-host",
+                "127.0.0.1",
+                "--auth-token",
+                "cli-secret",
+            ]),
             Some("0.0.0.0"),
+            Some("env-secret"),
         )
         .unwrap();
         assert_eq!(overridden.bind_host, "127.0.0.1");
+        assert_eq!(overridden.auth_token.as_deref(), Some("cli-secret"));
     }
 
     #[test]
     fn empty_bind_host_is_rejected() {
         let err = parse_args_with_env(
             &vec_args(&["droidpath-mcp", "--http", "--bind-host", "   "]),
+            None,
             None,
         )
         .err()

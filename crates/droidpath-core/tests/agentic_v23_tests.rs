@@ -134,6 +134,8 @@ async fn test_standardized_tool_schemas_and_http_endpoints() {
     assert_eq!(parsed_all["tool_count"], json!(9));
 
     http.stop().await;
+    assert!(http.bound_addr().await.is_none());
+    assert_eq!(http.port().await, 0);
 }
 
 #[tokio::test]
@@ -461,4 +463,6 @@ async fn test_http_bind_host_loopback_default_and_auth_gated_container_bind() {
     assert!(ok.starts_with("HTTP/1.1 200 OK"));
 
     http.stop().await;
+    assert!(http.bound_addr().await.is_none());
+    assert_eq!(http.port().await, 0);
 }

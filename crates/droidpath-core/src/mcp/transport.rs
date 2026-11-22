@@ -163,6 +163,16 @@ impl DroidPathHttpServer {
 
         let listener = TcpListener::bind((clean_host, port)).await?;
         let local_addr = listener.local_addr()?;
+        if !local_addr.ip().is_loopback() && auth_token.is_empty() {
+            drop(listener);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Refusing to bind resolved non-loopback address '{}' without a non-empty --auth-token",
+                    local_addr.ip()
+                ),
+            ));
+        }
         let actual_port = local_addr.port();
         *self.bound_addr.lock().await = Some(local_addr);
         *self.bound_port.lock().await = actual_port;
@@ -192,6 +202,8 @@ impl DroidPathHttpServer {
         if let Some(task) = self.accept_task.lock().await.take() {
             task.abort();
         }
+        *self.bound_addr.lock().await = None;
+        *self.bound_port.lock().await = 0;
         self.sse_sessions.lock().await.clear();
     }
 
