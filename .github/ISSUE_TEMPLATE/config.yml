@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability (Private Advisory)
+    url: https://github.com/V0val0x/DroidPath/security/advisories/new
+    about: Please report security, PII, or loopback bypass issues privately instead of opening a public issue.
+  - name: Security Policy
+    url: https://github.com/V0val0x/DroidPath/blob/main/SECURITY.md
+    about: Review DroidPath's threat model, loopback isolation, and disclosure timeline.

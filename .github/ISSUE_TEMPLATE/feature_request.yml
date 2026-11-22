@@ -1,0 +1,39 @@
+name: Feature Request
+description: Propose a new MCP capability, OEM Seed Graph route, client integration, or HUD enhancement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target Component
+      options:
+        - Rust Core / A* Router (droidpath-core)
+        - MCP Tools & Transports (droidpath-mcp)
+        - Kotlin Shadow DOM Daemon (android-daemon)
+        - Android Settings Seed Graph / OEM Aliases
+        - Tauri v2 Desktop HUD
+        - Installers / CLI / Agent Rules
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What workflow or friction are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe the desired behavior, MCP arguments, OEM selector aliases, or UI flow.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Optional notes on workarounds or tradeoffs.
+    validations:
+      required: false

@@ -1,0 +1,70 @@
+name: Bug Report
+description: Report a bug in DroidPath (MCP server, A* router, Kotlin daemon, Tauri HUD, or installers)
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please include `droidpath-mcp doctor` or relevant stderr logs (with any personal data removed).
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what happened vs what you expected.
+      placeholder: Expected Android navigation to reach Night Light via Seed Graph, but got stepTimeout...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Exact MCP call, CLI command, or UI steps to reproduce the issue.
+      placeholder: |
+        1. Connect device over USB ADB
+        2. Run `droidpath-mcp --stdio`
+        3. Call `android_navigate_to_node(target: "Night Light", auto_explore: true)`
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Rust Core / A* Router (droidpath-core)
+        - MCP Server (stdio / HTTP+SSE)
+        - Kotlin Shadow DOM Daemon (android-daemon.jar)
+        - Tauri v2 Desktop HUD
+        - Native Installers (install.sh / install.ps1) / Node CLI
+        - Documentation / Agent Rules
+    validations:
+      required: true
+  - type: input
+    id: os_version
+    attributes:
+      label: Host OS & Architecture
+      placeholder: macOS 15 arm64 / Windows 11 x64 / Ubuntu 24.04 x64
+    validations:
+      required: true
+  - type: input
+    id: android_device
+    attributes:
+      label: Android Device & OS Version (if applicable)
+      placeholder: Google Pixel 10a (Android 16) / Samsung Galaxy S24 (One UI 7)
+    validations:
+      required: false
+  - type: input
+    id: droidpath_version
+    attributes:
+      label: DroidPath Version
+      placeholder: v2.2.0 (output of `droidpath-mcp --version`)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Doctor Output / Logs
+      description: Output of `droidpath-mcp doctor` or relevant stderr output (please omit device serials or personal labels if sensitive).
+      render: shell
+    validations:
+      required: false
