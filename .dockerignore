@@ -1,0 +1,11 @@
+/.git
+/.github
+/target
+/dist
+/assets
+**/node_modules
+/apps/droidpath-desktop/dist
+/apps/droidpath-desktop/src-tauri/target
+/android-daemon/.gradle
+/android-daemon/build
+.DS_Store
