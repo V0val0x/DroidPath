@@ -301,6 +301,15 @@ async fn test_mcp_server_initialize_tools_list_stats_and_persistence_roundtrip()
     assert!(init_str.contains("droidpath-mcp"));
     assert!(init_str.contains("2025-03-26"));
 
+    let legacy_init_resp = server
+        .handle_raw_request_data(
+            br#"{"jsonrpc":"2.0","id":11,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        )
+        .await
+        .unwrap();
+    let legacy_init_str = String::from_utf8(legacy_init_resp).unwrap();
+    assert!(legacy_init_str.contains("\"protocolVersion\":\"2024-11-05\""));
+
     let list_resp = server
         .handle_raw_request_data(br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
         .await

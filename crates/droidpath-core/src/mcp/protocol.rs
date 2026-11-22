@@ -137,19 +137,30 @@ impl DroidPathMcpServerCore {
         let req_id = request.id?;
 
         let response = match request.method.as_str() {
-            "initialize" => McpJsonRpcResponse::ok(
-                req_id,
-                json!({
-                    "protocolVersion": Self::PROTOCOL_VERSION,
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    },
-                    "serverInfo": {
-                        "name": "droidpath-mcp",
-                        "version": Self::SERVER_VERSION
-                    }
-                }),
-            ),
+            "initialize" => {
+                let requested = request
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(Value::as_str);
+                let protocol_version = match requested {
+                    Some(v @ ("2024-11-05" | "2025-03-26" | "2025-06-18")) => v,
+                    _ => Self::PROTOCOL_VERSION,
+                };
+                McpJsonRpcResponse::ok(
+                    req_id,
+                    json!({
+                        "protocolVersion": protocol_version,
+                        "capabilities": {
+                            "tools": { "listChanged": false }
+                        },
+                        "serverInfo": {
+                            "name": "droidpath-mcp",
+                            "version": Self::SERVER_VERSION
+                        }
+                    }),
+                )
+            }
 
             "ping" => McpJsonRpcResponse::ok(req_id, json!({})),
 
