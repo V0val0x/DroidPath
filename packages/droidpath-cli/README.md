@@ -8,12 +8,14 @@ If you do not want to clone the repo or use Node.js, install the native Rust `dr
 
 **macOS & Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --deploy --configure-mcp all
+curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --configure-mcp all
+# Add --deploy if an Android device is already attached over USB/Wi-Fi.
 ```
 
 **Windows (PowerShell):**
 ```powershell
-$env:DROIDPATH_DEPLOY="1"; $env:DROIDPATH_CONFIGURE_MCP="all"; irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
+$env:DROIDPATH_CONFIGURE_MCP="all"; irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
+# Add $env:DROIDPATH_DEPLOY="1"; if an Android device is already attached over USB/Wi-Fi.
 ```
 
 ## Running the Node.js CLI (Local Clone / `npm link`)

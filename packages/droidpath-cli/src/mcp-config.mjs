@@ -74,13 +74,20 @@ export function resolveClientConfigPath(
       return targetPath.join(homeDir, ".lmstudio", "mcp.json");
     case "ollama":
     case "openwebui":
-    case "local":
-      return targetPath.join(homeDir, ".droidpath", "local-ai", "mcp-http.json");
+    case "local": {
+      const droidpathHome = env.DROIDPATH_HOME || targetPath.join(homeDir, ".droidpath");
+      return targetPath.join(droidpathHome, "local-ai", "mcp-http.json");
+    }
     default:
       throw new Error(
         `Unsupported MCP client '${client}'. Expected cursor, claude, claude-code, gemini, antigravity, lm-studio, ollama, openwebui, local, or all.`
       );
   }
+}
+
+export function defaultCliScriptPath() {
+  const candidate = path.resolve(__dirname, "..", "bin", "droidpath.mjs");
+  return existsSync(candidate) ? candidate : null;
 }
 
 export function buildMcpServerEntry({
@@ -89,6 +96,8 @@ export function buildMcpServerEntry({
   jarPath = null,
   port = 8766,
   daemonPort = 27189,
+  cliScriptPath = defaultCliScriptPath(),
+  nodePath = process.execPath,
 } = {}) {
   if (mode === "http") {
     return {
@@ -108,12 +117,28 @@ export function buildMcpServerEntry({
       args,
     };
   }
-  const args = ["-y", "droidpath", "mcp", "--stdio"];
+  if (cliScriptPath) {
+    const args = [cliScriptPath, "mcp", "--stdio"];
+    if (daemonPort !== 27189) {
+      args.push("--daemon-port", String(daemonPort));
+    }
+    if (jarPath) {
+      args.push("--jar", jarPath);
+    }
+    return {
+      command: nodePath || "node",
+      args,
+    };
+  }
+  const args = ["--stdio"];
   if (daemonPort !== 27189) {
     args.push("--daemon-port", String(daemonPort));
   }
+  if (jarPath) {
+    args.push("--daemon-jar", jarPath);
+  }
   return {
-    command: "npx",
+    command: "droidpath-mcp",
     args,
   };
 }
@@ -500,7 +525,7 @@ export function installAgentRulesFile({
 }
 
 export function installLocalAiBundle({
-  outDir = path.join(os.homedir(), ".droidpath", "local-ai"),
+  outDir = path.join(process.env.DROIDPATH_HOME || path.join(os.homedir(), ".droidpath"), "local-ai"),
   port = 8766,
   dryRun = false,
 } = {}) {

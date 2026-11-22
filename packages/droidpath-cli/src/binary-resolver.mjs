@@ -68,6 +68,7 @@ export function resolveMcpBinaryPath({ env = process.env, platform = process.pla
   const candidates = [];
 
   if (env.DROIDPATH_MCP_BIN) candidates.push(env.DROIDPATH_MCP_BIN);
+  if (env.DROIDPATH_HOME) candidates.push(path.join(env.DROIDPATH_HOME, "bin", exe));
   candidates.push(path.join(os.homedir(), ".droidpath", "bin", exe));
   candidates.push(path.resolve(__dirname, `../../../target/release/${exe}`));
   candidates.push(path.resolve(__dirname, `../../../target/debug/${exe}`));
@@ -90,16 +91,18 @@ export function resolveMcpBinaryPath({ env = process.env, platform = process.pla
   return null;
 }
 
-export function resolveDesktopHudBinaryPath({ platform = process.platform } = {}) {
+export function resolveDesktopHudBinaryPath({ env = process.env, platform = process.platform } = {}) {
   const candidates = [];
   if (platform === "darwin") {
     candidates.push("/Applications/DroidPath.app/Contents/MacOS/DroidPath");
     candidates.push(path.resolve(__dirname, "../../../target/release/bundle/macos/DroidPath.app/Contents/MacOS/DroidPath"));
     candidates.push(path.resolve(__dirname, "../../../target/release/droidpath-desktop"));
   } else if (platform === "win32") {
+    if (env.DROIDPATH_HOME) candidates.push(path.join(env.DROIDPATH_HOME, "bin", "droidpath-desktop.exe"));
     candidates.push(path.join(os.homedir(), ".droidpath", "bin", "droidpath-desktop.exe"));
     candidates.push(path.resolve(__dirname, "../../../target/release/droidpath-desktop.exe"));
   } else {
+    if (env.DROIDPATH_HOME) candidates.push(path.join(env.DROIDPATH_HOME, "bin", "droidpath-desktop"));
     candidates.push(path.join(os.homedir(), ".droidpath", "bin", "droidpath-desktop"));
     candidates.push(path.resolve(__dirname, "../../../target/release/droidpath-desktop"));
   }
@@ -239,7 +242,11 @@ export async function downloadNativeBinary({
     logger(`✅ Verified SHA-256 for ${asset} (${verified.slice(0, 16)}...)`);
   }
 
-  const binDir = destDir || path.join(os.homedir(), ".droidpath", "bin");
+  const binDir =
+    destDir ||
+    (env.DROIDPATH_HOME
+      ? path.join(env.DROIDPATH_HOME, "bin")
+      : path.join(os.homedir(), ".droidpath", "bin"));
   mkdirSync(binDir, { recursive: true });
   const exeName = platform === "win32" ? "droidpath-mcp.exe" : "droidpath-mcp";
   const dest = path.join(binDir, exeName);

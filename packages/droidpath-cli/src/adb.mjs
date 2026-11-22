@@ -11,9 +11,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REMOTE_DAEMON_JAR = "/data/local/tmp/android-daemon.jar";
 export const REMOTE_DAEMON_LOG = "/data/local/tmp/android-daemon.log";
 
-export function bundledDaemonJarPath() {
+export function bundledDaemonJarPath(env = process.env) {
   const candidates = [
-    process.env.DROIDPATH_DAEMON_JAR,
+    env.DROIDPATH_DAEMON_JAR,
+    env.DROIDPATH_HOME ? path.join(env.DROIDPATH_HOME, "share", "android-daemon.jar") : null,
     path.resolve(__dirname, "../assets/android-daemon.jar"),
     path.resolve(__dirname, "../../../android-daemon/build/dist/android-daemon.jar"),
     path.join(os.homedir(), ".droidpath", "share", "android-daemon.jar"),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -25,6 +25,7 @@ import {
   downloadNativeBinary,
   parseChecksumsManifest,
   releaseAssetName,
+  resolveMcpBinaryPath,
   verifySha256Buffer,
 } from "../src/binary-resolver.mjs";
 import { parseCliArgs, runCli, expandClients } from "../src/index.mjs";
@@ -35,6 +36,7 @@ import {
   buildMcpServerEntry,
   buildOpenAIToolSchemas,
   configureMcpClient,
+  defaultCliScriptPath,
   installAgentRulesFile,
   installLocalAiBundle,
   loadCanonicalAgentRules,
@@ -227,12 +229,64 @@ test("releaseAssetName covers all 6 desktop targets and CLI parses flags cleanly
   assert.equal(releaseAssetName("win32", "x64"), "droidpath-mcp-x86_64-pc-windows-msvc.exe");
   assert.equal(releaseAssetName("win32", "arm64"), "droidpath-mcp-aarch64-pc-windows-msvc.exe");
 
-  const parsed = parseCliArgs(["init", "--client", "cursor", "--http", "--port", "9000", "--dry-run"]);
+  const parsed = parseCliArgs([
+    "init",
+    "--client",
+    "cursor",
+    "--http",
+    "--port",
+    "9000",
+    "--auth-token",
+    "secret-123",
+    "--graph-path",
+    "/tmp/custom-graph.json",
+    "--dry-run",
+  ]);
   assert.deepEqual(parsed.positional, ["init"]);
   assert.equal(parsed.flags.client, "cursor");
   assert.equal(parsed.flags.http, true);
   assert.equal(parsed.flags.port, 9000);
+  assert.equal(parsed.flags.authToken, "secret-123");
+  assert.equal(parsed.flags.graphPath, "/tmp/custom-graph.json");
   assert.equal(parsed.flags.dryRun, true);
+
+  // When native binary is absent, buildMcpServerEntry must point to local bin/droidpath.mjs (NOT unpublished npx!)
+  const fallbackEntry = buildMcpServerEntry({ mode: "stdio", binaryPath: null, daemonPort: 27190 });
+  assert.notEqual(fallbackEntry.command, "npx");
+  assert.equal(fallbackEntry.command, process.execPath);
+  assert.equal(fallbackEntry.args[0], defaultCliScriptPath());
+  assert.ok(fallbackEntry.args.includes("mcp"));
+  assert.ok(fallbackEntry.args.includes("--stdio"));
+  assert.ok(fallbackEntry.args.includes("27190"));
+
+  // Without either native binary or local CLI script, fall back cleanly to native droidpath-mcp on PATH
+  const pathFallback = buildMcpServerEntry({ mode: "stdio", binaryPath: null, cliScriptPath: null });
+  assert.equal(pathFallback.command, "droidpath-mcp");
+  assert.deepEqual(pathFallback.args, ["--stdio"]);
+
+  // resolveMcpBinaryPath & resolveClientConfigPath honor custom DROIDPATH_HOME
+  const customHome = mkdtempSync(path.join(os.tmpdir(), "droidpath-custom-home-"));
+  try {
+    const exeName = process.platform === "win32" ? "droidpath-mcp.exe" : "droidpath-mcp";
+    const fakeBinDir = path.join(customHome, "bin");
+    const fakeBin = path.join(fakeBinDir, exeName);
+    mkdirSync(fakeBinDir, { recursive: true });
+    writeFileSync(fakeBin, "stub");
+    assert.equal(
+      resolveMcpBinaryPath({ env: { DROIDPATH_HOME: customHome, PATH: "" } }),
+      fakeBin
+    );
+    assert.equal(
+      resolveClientConfigPath("local", {
+        platform: "darwin",
+        homeDir: "/Users/dev",
+        env: { DROIDPATH_HOME: "/opt/droidpath" },
+      }),
+      "/opt/droidpath/local-ai/mcp-http.json"
+    );
+  } finally {
+    rmSync(customHome, { recursive: true, force: true });
+  }
 });
 
 test("runCli --version, --help, and doctor --json succeed cleanly", async () => {
@@ -873,18 +927,49 @@ test("scripts/install.sh verifies SHA-256 checksums.txt fail-closed on Unix", as
       assert.ok(parsed.mcpServers.droidpath.args.includes("--stdio"));
     }
 
-    // Verify targeted --configure-mcp gemini & antigravity work independently
+    // Verify targeted --configure-mcp gemini & antigravity + UTF-8 BOM preservation & DROIDPATH_CONFIGURE_MCP env var
     const geminiOnlyHome = path.join(tmpDir, "gemini-only");
-    await execFileAsync("bash", [scriptPath, "--configure-mcp", "gemini"], {
+    mkdirSync(path.join(geminiOnlyHome, ".gemini"), { recursive: true });
+    writeFileSync(
+      path.join(geminiOnlyHome, ".gemini", "settings.json"),
+      `\uFEFF${JSON.stringify({ theme: "dark", mcpServers: { existing: { command: "echo" } } })}\n`,
+      "utf8"
+    );
+    await execFileAsync("bash", [scriptPath], {
       env: {
         ...process.env,
         HOME: geminiOnlyHome,
         DROIDPATH_HOME: path.join(geminiOnlyHome, ".droidpath"),
+        DROIDPATH_CONFIGURE_MCP: "gemini",
         DROIDPATH_RELEASE_BASE_URL: `${base}/latest`,
       },
     });
     assert.equal(existsSync(path.join(geminiOnlyHome, ".gemini", "settings.json")), true);
+    const mergedGemini = JSON.parse(readFileSync(path.join(geminiOnlyHome, ".gemini", "settings.json"), "utf8"));
+    assert.equal(mergedGemini.theme, "dark");
+    assert.deepEqual(mergedGemini.mcpServers.existing, { command: "echo" });
+    assert.equal(
+      mergedGemini.mcpServers.droidpath.command,
+      path.join(geminiOnlyHome, ".droidpath", "bin", "droidpath-mcp")
+    );
     assert.equal(existsSync(path.join(geminiOnlyHome, ".cursor", "mcp.json")), false);
+
+    // Invalid DROIDPATH_CONFIGURE_MCP must fail fast BEFORE downloading/installing any binary
+    const invalidCfgHome = path.join(tmpDir, "invalid-cfg");
+    await assert.rejects(
+      () =>
+        execFileAsync("bash", [scriptPath], {
+          env: {
+            ...process.env,
+            HOME: invalidCfgHome,
+            DROIDPATH_HOME: path.join(invalidCfgHome, ".droidpath"),
+            DROIDPATH_CONFIGURE_MCP: "not-a-client",
+            DROIDPATH_RELEASE_BASE_URL: `${base}/latest`,
+          },
+        }),
+      (err) => String(err.stderr).includes("Invalid --configure-mcp")
+    );
+    assert.equal(existsSync(path.join(invalidCfgHome, ".droidpath", "bin", "droidpath-mcp")), false);
 
     const tamHome = path.join(tmpDir, "tampered");
     await assert.rejects(
@@ -1067,7 +1152,61 @@ test("scripts/install.ps1 verifies 2-hop GitHub -> external S3 CDN redirects, ap
       assert.ok(parsed.mcpServers.droidpath.args.includes("--stdio"));
     }
 
-    // 2. Tampered binary MUST fail closed and MUST NOT write droidpath-mcp.exe
+    // 2. Verify documented `irm ... | iex` (Invoke-Expression + env vars) path works end-to-end on Windows
+    const iexProfile = path.join(tmpDir, "iex-profile");
+    const iexAppData = path.join(iexProfile, "AppData", "Roaming");
+    const iexDroidPathHome = path.join(iexProfile, ".droidpath");
+    const iexRes = await execFileAsync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `Invoke-Expression (Get-Content -Raw -Path '${scriptPath.replaceAll("'", "''")}')`,
+      ],
+      {
+        env: {
+          ...process.env,
+          USERPROFILE: iexProfile,
+          APPDATA: iexAppData,
+          DROIDPATH_HOME: iexDroidPathHome,
+          DROIDPATH_RELEASE_BASE_URL: `${githubOrigin}/releases/latest/download`,
+          DROIDPATH_CONFIGURE_MCP: "all",
+          DROIDPATH_SKIP_PATH_UPDATE: "1",
+        },
+      }
+    );
+    assert.match(iexRes.stdout, /Verified SHA-256/);
+    assert.deepEqual(readFileSync(path.join(iexDroidPathHome, "bin", "droidpath-mcp.exe")), goodMcp);
+    assert.equal(existsSync(path.join(iexProfile, ".gemini", "settings.json")), true);
+    assert.equal(existsSync(path.join(iexProfile, ".gemini", "antigravity", "mcp_config.json")), true);
+
+    // 3. Invalid DROIDPATH_CONFIGURE_MCP must fail fast BEFORE downloading or installing binaries
+    const badCfgProfile = path.join(tmpDir, "bad-cfg-profile");
+    const badCfgHome = path.join(badCfgProfile, ".droidpath");
+    await assert.rejects(
+      () =>
+        execFileAsync(
+          "powershell.exe",
+          ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+          {
+            env: {
+              ...process.env,
+              USERPROFILE: badCfgProfile,
+              APPDATA: path.join(badCfgProfile, "AppData", "Roaming"),
+              DROIDPATH_HOME: badCfgHome,
+              DROIDPATH_RELEASE_BASE_URL: `${githubOrigin}/releases/latest/download`,
+              DROIDPATH_CONFIGURE_MCP: "not-a-client",
+              DROIDPATH_SKIP_PATH_UPDATE: "1",
+            },
+          }
+        ),
+      (err) => `${err.stderr || ""}${err.stdout || ""}`.includes("Invalid DROIDPATH_CONFIGURE_MCP")
+    );
+    assert.equal(existsSync(path.join(badCfgHome, "bin", "droidpath-mcp.exe")), false);
+
+    // 4. Tampered binary MUST fail closed and MUST NOT write droidpath-mcp.exe
     const tamProfile = path.join(tmpDir, "tampered-profile");
     const tamHome = path.join(tamProfile, ".droidpath");
     await assert.rejects(

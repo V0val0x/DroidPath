@@ -9,10 +9,10 @@ REPO="V0val0x/DroidPath"
 INSTALL_ROOT="${DROIDPATH_HOME:-$HOME/.droidpath}"
 BIN_DIR="$INSTALL_ROOT/bin"
 SHARE_DIR="$INSTALL_ROOT/share"
-VERSION="latest"
+VERSION="${DROIDPATH_VERSION:-latest}"
 FROM_LOCAL=""
-DO_DEPLOY=0
-CONFIGURE_MCP=""
+DO_DEPLOY="${DROIDPATH_DEPLOY:-0}"
+CONFIGURE_MCP="${DROIDPATH_CONFIGURE_MCP:-}"
 DAEMON_PORT=27189
 SERIAL=""
 ALLOW_UNVERIFIED="${DROIDPATH_ALLOW_UNVERIFIED:-0}"
@@ -56,9 +56,12 @@ if [[ ! "$DAEMON_PORT" =~ ^[0-9]+$ ]] || (( DAEMON_PORT < 1 || DAEMON_PORT > 655
   exit 2
 fi
 
-if [[ -n "$CONFIGURE_MCP" && "$CONFIGURE_MCP" != "cursor" && "$CONFIGURE_MCP" != "claude" && "$CONFIGURE_MCP" != "gemini" && "$CONFIGURE_MCP" != "antigravity" && "$CONFIGURE_MCP" != "all" ]]; then
-  echo "ERROR: Invalid --configure-mcp target '$CONFIGURE_MCP' (expected cursor, claude, gemini, antigravity, or all)" >&2
-  exit 2
+if [[ -n "$CONFIGURE_MCP" ]]; then
+  CONFIGURE_MCP="$(printf '%s' "$CONFIGURE_MCP" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$CONFIGURE_MCP" != "cursor" && "$CONFIGURE_MCP" != "claude" && "$CONFIGURE_MCP" != "gemini" && "$CONFIGURE_MCP" != "antigravity" && "$CONFIGURE_MCP" != "all" ]]; then
+    echo "ERROR: Invalid --configure-mcp / DROIDPATH_CONFIGURE_MCP target '$CONFIGURE_MCP' (expected cursor, claude, gemini, antigravity, or all)" >&2
+    exit 2
+  fi
 fi
 
 OS="$(uname -s)"
@@ -205,7 +208,9 @@ else
     BASE_URL="https://github.com/$REPO/releases/download/$VERSION"
   fi
 
-  TMP_STAGE="$(mktemp -d)"
+  # Stage inside $INSTALL_ROOT so final `mv -f` is a guaranteed same-filesystem atomic rename(2)
+  # (prevents cross-mount copy and Linux ETXTBSY when upgrading an active droidpath-mcp binary).
+  TMP_STAGE="$(mktemp -d "$INSTALL_ROOT/.install-stage.XXXXXX")"
   trap 'rm -rf "${TMP_STAGE:-}"' EXIT
 
   MCP_ASSET="droidpath-mcp-$TARGET"
@@ -255,7 +260,7 @@ import json, os, sys
 cfg_path, mcp_bin, jar_path, port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 doc = {}
 if os.path.exists(cfg_path):
-    with open(cfg_path, "r", encoding="utf-8") as f:
+    with open(cfg_path, "r", encoding="utf-8-sig") as f:
         raw = f.read().strip()
         if raw:
             doc = json.loads(raw)
@@ -271,11 +276,18 @@ args = ["--stdio", "--daemon-jar", jar_path]
 if port != 27189:
     args.extend(["--daemon-port", str(port)])
 servers["droidpath"] = {"command": mcp_bin, "args": args}
-tmp = cfg_path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(doc, f, indent=2)
-    f.write("\n")
-os.replace(tmp, cfg_path)
+tmp = f"{cfg_path}.{os.getpid()}.tmp"
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, cfg_path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
 PYEOF
     echo "✅ Configured MCP client -> $config_path"
   else
@@ -303,7 +315,7 @@ if [[ -n "$CONFIGURE_MCP" ]]; then
   fi
 fi
 
-if [[ "$DO_DEPLOY" -eq 1 ]]; then
+if [[ "$DO_DEPLOY" == "1" || "$DO_DEPLOY" == "true" ]]; then
   DEPLOY_ARGS=("deploy" "--daemon-port" "$DAEMON_PORT" "--daemon-jar" "$JAR_DEST")
   [[ -n "$SERIAL" ]] && DEPLOY_ARGS+=("--serial" "$SERIAL")
   "$MCP_DEST" "${DEPLOY_ARGS[@]}"

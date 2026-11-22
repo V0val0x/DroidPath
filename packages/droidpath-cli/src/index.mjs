@@ -63,6 +63,8 @@ OPTIONS:
   --http                Use HTTP/SSE transport instead of stdio
   --stdio               Use stdio JSON-RPC transport (default for mcp)
   --port <port>         HTTP/SSE listen port (default: 8766)
+  --auth-token <token>  Optional Bearer token for HTTP/SSE MCP server
+  --graph-path <path>   Custom Spatial Graph JSON path (default: ~/.droidpath/shadow_graph.json)
   --configure           Also configure MCP clients during 'start'
   --deploy              Also deploy android-daemon during 'init'
   --no-auto-deploy      Skip automatic daemon deploy before starting 'mcp'
@@ -80,6 +82,8 @@ export function parseCliArgs(argv) {
     daemonPort: 27189,
     port: 8766,
     jar: null,
+    authToken: null,
+    graphPath: null,
     client: "all",
     noRules: false,
     dir: null,
@@ -139,6 +143,12 @@ export function parseCliArgs(argv) {
       case "--jar":
       case "--daemon-jar":
         flags.jar = requireFlagValue(a, ++i);
+        break;
+      case "--auth-token":
+        flags.authToken = requireFlagValue("--auth-token", ++i);
+        break;
+      case "--graph-path":
+        flags.graphPath = requireFlagValue("--graph-path", ++i);
         break;
       case "--client":
         flags.client = requireFlagValue("--client", ++i);
@@ -227,7 +237,8 @@ function installRulesForClients(clients, { projectDir, homeDir, globalInstall, p
   }
 
   if (needsLocalBundle) {
-    const bundleDir = localAiDir || path.join(homeDir, ".droidpath", "local-ai");
+    const droidpathHome = process.env.DROIDPATH_HOME || path.join(homeDir, ".droidpath");
+    const bundleDir = localAiDir || path.join(droidpathHome, "local-ai");
     for (const r of installLocalAiBundle({ outDir: bundleDir, port, dryRun })) {
       if (!seenFiles.has(r.filePath)) {
         seenFiles.add(r.filePath);
@@ -518,6 +529,8 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       if (flags.http) childArgs.push("--port", String(flags.port));
       childArgs.push("--daemon-port", String(flags.daemonPort));
       if (jarPath) childArgs.push("--daemon-jar", jarPath);
+      if (flags.authToken) childArgs.push("--auth-token", flags.authToken);
+      if (flags.graphPath) childArgs.push("--graph-path", flags.graphPath);
 
       return await new Promise((resolve) => {
         const child = spawn(binPath, childArgs, { stdio: "inherit" });
@@ -556,7 +569,8 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
       const tcpReachable = await checkTcpPort("127.0.0.1", flags.daemonPort, 350);
       const mcpBin = resolveMcpBinaryPath();
       const hudBin = resolveDesktopHudBinaryPath();
-      const graphPath = path.join(homeDir, ".droidpath", "shadow_graph.json");
+      const droidpathHome = process.env.DROIDPATH_HOME || path.join(homeDir, ".droidpath");
+      const graphPath = flags.graphPath || path.join(droidpathHome, "shadow_graph.json");
       const cursorPath = resolveClientConfigPath("cursor");
       const claudePath = resolveClientConfigPath("claude");
       const claudeCodePath = resolveClientConfigPath("claude-code");

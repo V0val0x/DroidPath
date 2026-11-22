@@ -13,7 +13,7 @@
 
 **DroidPath** избавляет ИИ-агентов от медленных и дорогих циклов *«скриншот → рассуждение VLM → клик»* при автоматизации Android. Вместо анализа скриншотов на каждом шаге DroidPath стримит живой **Shadow DOM** напрямую из Accessibility/Window API, компилирует переходы между экранами в **персистентный Spatial Graph** и проходит многошаговые маршруты детерминированным **алгоритмом A\*** за миллисекунды — с **нулём промежуточных вызовов LLM**.
 
-Построен на **кроссплатформенном Rust (`droidpath-core`)** без JVM, компактном нативном **MCP CLI (`droidpath-mcp`, ~1.8 МБ)**, **Tauri v2 Desktop HUD (`~3.9 МБ`)** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **нативных установщиках в 1 клик с SHA-256 проверкой** (`install.sh` / `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
+Построен на **кроссплатформенном Rust (`droidpath-core`)** без JVM, компактном нативном **MCP CLI (`droidpath-mcp`, ~2.0 МБ)**, **Tauri v2 Desktop HUD (`~3 МБ` установщик)** со встроенным зеркалом экрана H.264 -> WebCodecs (Windows, Linux Wayland/X11, macOS) и **нативных установщиках в 1 клик с SHA-256 проверкой** (`install.sh` / `install.ps1`). Формат `~/.droidpath/shadow_graph.json` на **100% совместим** с нативным macOS-приложением [**AndOnMac**](https://github.com/V0val0x/AndOnMac).
 
 ---
 
@@ -35,19 +35,23 @@
 
 **macOS и Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --deploy --configure-mcp all
+# Установка droidpath-mcp + android-daemon.jar и авто-настройка Cursor, Claude Desktop, Gemini CLI и Antigravity:
+curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --configure-mcp all
+
+# Если Android-устройство уже подключено по USB/Wi-Fi, можно сразу развернуть демон:
+curl -fsSL https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.sh | bash -s -- --configure-mcp all --deploy
 ```
 
 **Windows (PowerShell):**
 ```powershell
-# Установка droidpath-mcp.exe + android-daemon.jar и добавление ~/.droidpath/bin в User PATH:
-irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
+# Установка droidpath-mcp.exe + android-daemon.jar, добавление ~/.droidpath/bin в User PATH и авто-настройка MCP-клиентов:
+$env:DROIDPATH_CONFIGURE_MCP="all"; irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
 
-# Установка + деплой демона + авто-настройка Cursor, Claude Desktop, Gemini CLI и Antigravity:
+# Если Android-устройство уже подключено по USB/Wi-Fi, можно сразу развернуть демон:
 $env:DROIDPATH_DEPLOY="1"; $env:DROIDPATH_CONFIGURE_MCP="all"; irm https://raw.githubusercontent.com/V0val0x/DroidPath/main/scripts/install.ps1 | iex
 
 # Или из локального клона с явными параметрами:
-.\scripts\install.ps1 -Deploy -ConfigureMcp all
+.\scripts\install.ps1 -ConfigureMcp all -Deploy
 ```
 
 После установки `droidpath-mcp` находится в `~/.droidpath/bin/droidpath-mcp` (Windows: `%USERPROFILE%\.droidpath\bin\droidpath-mcp.exe`) рядом с `~/.droidpath/share/android-daemon.jar`:
@@ -159,7 +163,7 @@ droidpath mcp --stdio             # Запуск нативного Rust MCP-с�
 
 ```mermaid
 flowchart LR
-    Agent["ИИ-агент (Claude / Cursor / Gemini / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~1.8 МБ)\nНативный CLI и MCP-сервер"]
+    Agent["ИИ-агент (Claude / Cursor / Gemini / MCP-клиент)"] <-->|"JSON-RPC 2.0 (stdio / HTTP+SSE)"| CLI["droidpath-mcp (Rust ~2.0 МБ)\nНативный CLI и MCP-сервер"]
 
     subgraph Host["Windows · Linux · macOS Хост (Rust droidpath-core + Tauri v2 HUD)"]
         CLI <-->|"Поиск путей и пассивное обучение"| Bridge["ShadowGraphBridge"]
@@ -183,7 +187,7 @@ flowchart LR
 ```
 
 1. **Layer 1 — Headless Kotlin Shadow DOM демон (`android-daemon/`):**
-   - Автономный **single-DEX JAR (649 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK и выполняет нативный ввод `tap`/`swipe`/`keyevent` через `UiAutomation` напрямую по TCP `:27189` (с zero-fling 120Hz свайпами и авто-fallback на `adb`).
+   - Автономный **single-DEX JAR (~648 КБ)** (`android-daemon.jar`), запускается через `app_process` без установки APK и выполняет нативный ввод `tap`/`swipe`/`keyevent` через `UiAutomation` напрямую по TCP `:27189` (с zero-fling 120Hz свайпами и авто-fallback на `adb`).
    - Реализует **Privacy by Design** на устройстве: привязывает TCP-сокет строго к локальной петле `127.0.0.1` (`adb forward`) и маскирует `isPassword` / чувствительные поля ввода на `"***"` до отправки по TCP (`:27189`).
    - Стримит полные снимки, инкрементальные NDJSON-диффы, привязку к основному окну приложения (`TYPE_APPLICATION`) под оверлеями `com.android.systemui` и события `SECURE_SCREEN_ACTIVE` / `SECURE_SCREEN_CLEARED` при `FLAG_SECURE` / биометрии по TCP (`:27189`).
 
@@ -232,7 +236,7 @@ cd DroidPath
 # 1. Тесты Rust ядра и MCP-сервера
 cargo test -p droidpath-core -p droidpath-mcp
 
-# 2. Сборка нативного release-бинарника droidpath-mcp (~1.8 МБ, без JVM)
+# 2. Сборка нативного release-бинарника droidpath-mcp (~2.0 МБ, без JVM)
 cargo build --release -p droidpath-mcp
 
 # 3. Тесты Node.js CLI и установщиков

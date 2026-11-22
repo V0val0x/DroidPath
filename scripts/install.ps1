@@ -23,6 +23,21 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# Resolve & validate environment-variable options BEFORE touching disk, network, or User PATH
+if ($Version -eq "latest" -and $env:DROIDPATH_VERSION) {
+    $Version = $env:DROIDPATH_VERSION.Trim()
+}
+if ($ConfigureMcp -eq "" -and $env:DROIDPATH_CONFIGURE_MCP) {
+    $EnvCfg = $env:DROIDPATH_CONFIGURE_MCP.Trim().ToLowerInvariant()
+    if ($EnvCfg -notin @("cursor", "claude", "gemini", "antigravity", "all")) {
+        throw "Invalid DROIDPATH_CONFIGURE_MCP value '$EnvCfg' (expected cursor, claude, gemini, antigravity, or all)."
+    }
+    $ConfigureMcp = $EnvCfg
+}
+if (-not $Deploy -and ($env:DROIDPATH_DEPLOY -eq "1" -or $env:DROIDPATH_DEPLOY -eq "true")) {
+    $Deploy = [switch]::Present
+}
+
 # Ensure TLS 1.2+ on Windows PowerShell 5.1 (GitHub Releases rejects TLS 1.0/1.1)
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -191,7 +206,8 @@ if ($FromLocal -ne "") {
         "https://github.com/$Repo/releases/download/$Version"
     }
 
-    $StageDir = Join-Path ([System.IO.Path]::GetTempPath()) ("droidpath-install-" + [Guid]::NewGuid().ToString("N"))
+    # Stage inside $InstallRoot so final Move-Item stays on the same volume (atomic replacement)
+    $StageDir = Join-Path $InstallRoot (".install-stage-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
     try {
@@ -314,17 +330,6 @@ function Set-McpClientConfig {
     Write-Host "Configured MCP client -> $ConfigPath" -ForegroundColor Green
 }
 
-if ($ConfigureMcp -eq "" -and $env:DROIDPATH_CONFIGURE_MCP) {
-    $EnvCfg = $env:DROIDPATH_CONFIGURE_MCP.Trim().ToLowerInvariant()
-    if ($EnvCfg -notin @("cursor", "claude", "gemini", "antigravity", "all")) {
-        throw "Invalid DROIDPATH_CONFIGURE_MCP value '$EnvCfg' (expected cursor, claude, gemini, antigravity, or all)."
-    }
-    $ConfigureMcp = $EnvCfg
-}
-if (-not $Deploy -and $env:DROIDPATH_DEPLOY -eq "1") {
-    $Deploy = [switch]::Present
-}
-
 if ($ConfigureMcp -eq "cursor" -or $ConfigureMcp -eq "all") {
     Set-McpClientConfig (Join-Path $env:USERPROFILE ".cursor\mcp.json")
 }
@@ -346,4 +351,7 @@ if ($Deploy) {
         $DeployArgs += @("--serial", $Serial)
     }
     & $McpDest @DeployArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "droidpath-mcp deploy failed with exit code $LASTEXITCODE."
+    }
 }
