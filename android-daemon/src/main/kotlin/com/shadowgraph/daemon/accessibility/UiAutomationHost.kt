@@ -26,29 +26,100 @@ class UiAutomationHost(private val config: DaemonConfig) {
     fun connect(): UiAutomation {
         HiddenApiCompat.exemptHiddenApis()
 
+        if (config.waitBoot) {
+            waitForBootCompleted()
+        }
+
         if (!looperThread.isAlive) {
             looperThread.start()
         }
         val looper: Looper = looperThread.looper
 
-        val connectionClass = Class.forName("android.app.UiAutomationConnection")
-        val iConnectionClass = Class.forName("android.app.IUiAutomationConnection")
-        val connectionCtor = connectionClass.getDeclaredConstructor()
-        connectionCtor.isAccessible = true
-        val connection = connectionCtor.newInstance()
+        val maxAttempts = 1 + config.connectRetries.coerceAtLeast(0)
+        var delayMs = config.connectRetryDelayMs.coerceAtLeast(50L)
+        var lastError: Throwable? = null
 
-        val uiaCtor = UiAutomation::class.java.getDeclaredConstructor(
-            Looper::class.java,
-            iConnectionClass
-        )
-        uiaCtor.isAccessible = true
-        val uia = uiaCtor.newInstance(looper, connection)
+        for (attempt in 1..maxAttempts) {
+            var candidate: UiAutomation? = null
+            try {
+                val connectionClass = Class.forName("android.app.UiAutomationConnection")
+                val iConnectionClass = Class.forName("android.app.IUiAutomationConnection")
+                val connectionCtor = connectionClass.getDeclaredConstructor()
+                connectionCtor.isAccessible = true
+                val connection = connectionCtor.newInstance()
 
-        invokeConnect(uia)
-        configureServiceInfo(uia)
+                val uiaCtor = UiAutomation::class.java.getDeclaredConstructor(
+                    Looper::class.java,
+                    iConnectionClass
+                )
+                uiaCtor.isAccessible = true
+                val uia = uiaCtor.newInstance(looper, connection)
+                candidate = uia
 
-        uiAutomation = uia
-        return uia
+                invokeConnect(uia)
+                configureServiceInfo(uia)
+
+                uiAutomation = uia
+                return uia
+            } catch (t: Throwable) {
+                lastError = t
+                if (candidate != null) {
+                    try {
+                        val disconnectMethod = UiAutomation::class.java.getDeclaredMethod("disconnect")
+                        disconnectMethod.isAccessible = true
+                        disconnectMethod.invoke(candidate)
+                    } catch (_: Throwable) {
+                    }
+                }
+                if (attempt < maxAttempts) {
+                    if (config.verbose) {
+                        System.err.println(
+                            "[ShadowGraph] UiAutomation connect attempt $attempt/$maxAttempts failed " +
+                                "(${t.javaClass.simpleName}: ${t.message}); retrying in ${delayMs}ms"
+                        )
+                    }
+                    try {
+                        Thread.sleep(delayMs)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                    delayMs = (delayMs * 2L).coerceAtMost(3000L)
+                }
+            }
+        }
+
+        throw lastError ?: IllegalStateException("UiAutomation connect failed after $maxAttempts attempts")
+    }
+
+    private fun waitForBootCompleted() {
+        val maxPolls = (config.connectRetries.coerceAtLeast(1) * 4).coerceAtLeast(12)
+        val pollDelayMs = config.connectRetryDelayMs.coerceIn(100L, 1000L)
+        for (i in 0 until maxPolls) {
+            if (readSystemProperty("sys.boot_completed") == "1") {
+                return
+            }
+            if (config.verbose && i == 0) {
+                System.err.println("[ShadowGraph] Waiting for sys.boot_completed=1 (headless/emulator boot)...")
+            }
+            try {
+                Thread.sleep(pollDelayMs)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
+    private fun readSystemProperty(key: String): String? {
+        return try {
+            val sp = Class.forName("android.os.SystemProperties")
+            val getMethod = sp.getDeclaredMethod("get", String::class.java)
+            getMethod.isAccessible = true
+            getMethod.invoke(null, key) as? String
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun invokeConnect(uia: UiAutomation) {

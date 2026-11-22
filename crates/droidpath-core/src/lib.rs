@@ -22,14 +22,15 @@ pub use manager::{
 };
 pub use mcp::{
     DroidPathHttpServer, DroidPathMcpServerCore, DroidPathStdioTransport,
-    DroidPathUITreeFallbackParser, McpJsonRpcError, McpJsonRpcRequest, McpJsonRpcResponse,
-    McpToolAnnotations, McpToolDefinition, McpToolResult,
+    DroidPathUITreeFallbackParser, McpContentBlock, McpJsonRpcError, McpJsonRpcRequest,
+    McpJsonRpcResponse, McpToolAnnotations, McpToolDefinition, McpToolResult, ToolSchemaExporter,
+    ToolSchemaFormat,
 };
 pub use protocol::{
     DaemonCommand, NdjsonWireCodec, ShadowCompactNode, ShadowPatchMask, ShadowTreeMatchMode,
     ShadowUINode, WireCodec, WireCodecError, WireDiffPayload, WireErrorPayload,
     WireHeartbeatPayload, WireHelloPayload, WireInputResultPayload, WireMessage, WireNodePatch,
-    WirePongPayload, WireSecureScreenPayload, WireSnapshotPayload,
+    WirePongPayload, WireSecureScreenPayload, WireSnapshotPayload, WireVisionFramePayload,
 };
 pub use router::{
     AStarCostConfiguration, AStarPathfinder, AStarSearchResult, DismissCandidate,
@@ -45,10 +46,11 @@ pub use shadow_dom::{
     BoundsRect, ResyncHandler, ShadowDOMUpdate, ShadowDomState, ShadowTreeIndex, SnapshotMetadata,
 };
 pub use spatial_graph::{
-    AttributedUIAction, HazardCategory, HazardousActionAssessment, HazardousActionClassifier,
-    RankedVertexMatch, ScreenLayoutHasher, ScreenSemanticFingerprint, ScreenStateVertex,
-    ScreenTransitionEdge, SeedGraphCatalog, SeedMergeReport, SpatialGraphEngine,
-    SpatialGraphSnapshot, TopologyChangedHandler, UIActionKind,
+    AgenticFeedback, AgenticFeedbackBuilder, AttributedUIAction, ChangedNodeSummary,
+    FeedbackCandidate, HazardCategory, HazardousActionAssessment, HazardousActionClassifier,
+    RankedVertexMatch, ScreenDeltaSummary, ScreenLayoutHasher, ScreenSemanticFingerprint,
+    ScreenStateVertex, ScreenTransitionEdge, SeedGraphCatalog, SeedMergeReport,
+    SpatialGraphEngine, SpatialGraphSnapshot, TopologyChangedHandler, UIActionKind,
 };
 pub use transport::{
     BeforeReconnectHook, DaemonClientError, DaemonClientMetrics, DaemonConnectionState,

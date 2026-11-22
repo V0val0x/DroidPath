@@ -8,7 +8,7 @@ use crate::bridge::{ExploreOutcome, ShadowNavigationOutcome};
 use crate::manager::DroidPathManager;
 use crate::protocol::ShadowCompactNode;
 use crate::router::{MacroActionExecutor, PathDeviationError};
-use crate::spatial_graph::AttributedUIAction;
+use crate::spatial_graph::{AgenticFeedback, AgenticFeedbackBuilder, AttributedUIAction};
 
 use super::xml_fallback::DroidPathUITreeFallbackParser;
 
@@ -79,9 +79,16 @@ pub struct McpToolDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpContentBlock {
+    Text { text: String },
+    Image { data: String, mime_type: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolResult {
     pub text: String,
     pub is_error: bool,
+    pub extra_content: Vec<McpContentBlock>,
 }
 
 impl McpToolResult {
@@ -89,15 +96,47 @@ impl McpToolResult {
         Self {
             text: text.into(),
             is_error,
+            extra_content: Vec::new(),
+        }
+    }
+
+    pub fn text_with_image(
+        text: impl Into<String>,
+        image_base64: impl Into<String>,
+        mime_type: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            is_error,
+            extra_content: vec![McpContentBlock::Image {
+                data: image_base64.into(),
+                mime_type: mime_type.into(),
+            }],
         }
     }
 
     pub fn to_json_value(&self) -> Value {
+        let mut blocks = Vec::with_capacity(1 + self.extra_content.len());
+        blocks.push(json!({
+            "type": "text",
+            "text": self.text
+        }));
+        for block in &self.extra_content {
+            match block {
+                McpContentBlock::Text { text } => blocks.push(json!({
+                    "type": "text",
+                    "text": text
+                })),
+                McpContentBlock::Image { data, mime_type } => blocks.push(json!({
+                    "type": "image",
+                    "data": data,
+                    "mimeType": mime_type
+                })),
+            }
+        }
         json!({
-            "content": [{
-                "type": "text",
-                "text": self.text
-            }],
+            "content": blocks,
             "isError": self.is_error
         })
     }
@@ -303,10 +342,29 @@ impl DroidPathMcpServerCore {
             },
             McpToolDefinition {
                 name: "android_get_ui_tree",
-                description: "Reads visible Android UI nodes from the live accessibility stream (falling back to uiautomator XML dump if the stream is cold) on the first connected ADB device or device_serial. Use for read-only UI inspection without touching the screen or modifying the navigation graph; prefer android_graph_stats for learned graph telemetry, or android_explore_and_click to locate and tap in a single call. Blocks briefly if accessibility recovery or XML fallback runs and returns a JSON array of nodes containing index, text, resource_id, content_desc, class, clickable, scrollable, bounds, center_x, and center_y (or an error if ADB fails).",
+                description: "Reads visible Android UI nodes from the live accessibility stream (falling back to uiautomator XML dump if the stream is cold) on the first connected ADB device or device_serial. Use for read-only UI inspection without touching the screen or modifying the navigation graph; prefer android_graph_stats for learned graph telemetry, or android_explore_and_click to locate and tap in a single call. Supports opt-in hybrid UI Tree + Vision streaming via include_vision=true (off by default, strictly blocked on FLAG_SECURE/biometric screens) to attach a heavily compressed JPEG screenshot alongside the structured UI tree for multimodal agents. Returns a JSON array of nodes (or a hybrid object + MCP image block when include_vision=true).",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
+                        "include_vision": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Opt-in multimodal mode: when true, attaches a heavily compressed downscaled JPEG screenshot alongside the UI node tree as a second MCP image content block. Strictly disabled by default and automatically blocked on FLAG_SECURE / biometric screens."
+                        },
+                        "vision_max_width": {
+                            "type": "integer",
+                            "minimum": 160,
+                            "maximum": 1080,
+                            "default": 540,
+                            "description": "Maximum pixel width for the downscaled JPEG screenshot when include_vision is true (clamped to 160-1080). Default: 540."
+                        },
+                        "vision_quality": {
+                            "type": "integer",
+                            "minimum": 10,
+                            "maximum": 85,
+                            "default": 50,
+                            "description": "JPEG compression quality (10-85) when include_vision is true. Lower values minimize multimodal token and bandwidth overhead. Default: 50."
+                        },
                         "device_serial": serial_prop
                     },
                     "required": []
@@ -548,32 +606,122 @@ impl DroidPathMcpServerCore {
             }
 
             "android_get_ui_tree" => {
+                let include_vision = get_bool("include_vision").unwrap_or(false);
+                let vision_max_width = get_i32("vision_max_width").unwrap_or(540).clamp(160, 1080);
+                let vision_quality = get_i32("vision_quality").unwrap_or(50).clamp(10, 85);
+
                 let serial = self
                     .adb_runner
                     .resolve_target_serial(get_serial())
                     .await
                     .map_err(|e| e.to_string())?;
                 self.manager.ensure_started(Some(&serial), false).await;
-                if let Some(cached) = self.manager.fast_compact_tree_if_fresh(0.8, 15.0).await {
-                    let s = serde_json::to_string(&cached).map_err(|e| e.to_string())?;
-                    return Ok(McpToolResult::text(s, false));
-                }
-                let port = self.manager.bridge.client.configuration().port;
-                if port > 0
-                    && self
-                        .manager
-                        .recover_daemon_and_await_stream(&serial, port)
-                        .await
-                {
-                    if let Some(cached) = self.manager.fast_compact_tree_if_fresh(0.8, 15.0).await {
-                        let s = serde_json::to_string(&cached).map_err(|e| e.to_string())?;
-                        return Ok(McpToolResult::text(s, false));
+
+                let mut nodes_opt = self.manager.fast_compact_tree_if_fresh(0.8, 15.0).await;
+                if nodes_opt.is_none() {
+                    let port = self.manager.bridge.client.configuration().port;
+                    if port > 0
+                        && self
+                            .manager
+                            .recover_daemon_and_await_stream(&serial, port)
+                            .await
+                    {
+                        nodes_opt = self.manager.fast_compact_tree_if_fresh(0.8, 15.0).await;
                     }
                 }
-                let xml = self.fetch_fallback_ui_xml(&serial).await?;
-                let parsed = DroidPathUITreeFallbackParser::parse(&xml);
-                let s = serde_json::to_string(&parsed).map_err(|e| e.to_string())?;
-                Ok(McpToolResult::text(s, false))
+                let nodes = match nodes_opt {
+                    Some(cached) => cached,
+                    None => {
+                        let xml = self.fetch_fallback_ui_xml(&serial).await?;
+                        DroidPathUITreeFallbackParser::parse(&xml)
+                    }
+                };
+
+                if !include_vision {
+                    let s = serde_json::to_string(&nodes).map_err(|e| e.to_string())?;
+                    return Ok(McpToolResult::text(s, false));
+                }
+
+                // Opt-in hybrid mode: strictly block vision capture when FLAG_SECURE is active.
+                if self.manager.bridge.dom_state.is_secure_screen_active().await {
+                    let payload = json!({
+                        "nodes": nodes,
+                        "vision": {
+                            "included": false,
+                            "blocked_reason": "FLAG_SECURE",
+                            "message": "Vision frame strictly blocked because FLAG_SECURE / biometric screen is active."
+                        }
+                    });
+                    return Ok(McpToolResult::text(payload.to_string(), false));
+                }
+
+                let _ = self
+                    .manager
+                    .bridge
+                    .client
+                    .wait_for_hello(std::time::Duration::from_millis(150))
+                    .await;
+
+                match self
+                    .manager
+                    .bridge
+                    .client
+                    .request_vision_frame(
+                        vision_max_width,
+                        vision_quality,
+                        std::time::Duration::from_secs(3),
+                    )
+                    .await
+                {
+                    Ok(frame)
+                        if frame.ok
+                            && frame
+                                .data_base64
+                                .as_deref()
+                                .is_some_and(|s| !s.is_empty()) =>
+                    {
+                        let b64 = frame.data_base64.unwrap_or_default();
+                        let payload = json!({
+                            "nodes": nodes,
+                            "vision": {
+                                "included": true,
+                                "mime_type": frame.mime_type,
+                                "width": frame.width,
+                                "height": frame.height,
+                                "quality": frame.quality,
+                                "byte_length": frame.byte_length,
+                                "elapsed_ms": frame.elapsed_ms
+                            }
+                        });
+                        Ok(McpToolResult::text_with_image(
+                            payload.to_string(),
+                            b64,
+                            frame.mime_type,
+                            false,
+                        ))
+                    }
+                    Ok(frame) => {
+                        let payload = json!({
+                            "nodes": nodes,
+                            "vision": {
+                                "included": false,
+                                "blocked_reason": frame.blocked_reason,
+                                "error": frame.error
+                            }
+                        });
+                        Ok(McpToolResult::text(payload.to_string(), false))
+                    }
+                    Err(err) => {
+                        let payload = json!({
+                            "nodes": nodes,
+                            "vision": {
+                                "included": false,
+                                "error": err.to_string()
+                            }
+                        });
+                        Ok(McpToolResult::text(payload.to_string(), false))
+                    }
+                }
             }
 
             "android_navigate_to_node" => {
@@ -601,6 +749,8 @@ impl DroidPathMcpServerCore {
                 let confirmed = get_bool("confirmed").unwrap_or(false);
                 let auto_explore = get_bool("auto_explore").unwrap_or(false);
 
+                let pre_index = self.manager.bridge.dom_state.current_index().await;
+                let target_for_fb = target.clone();
                 match self
                     .manager
                     .navigate_to_node(
@@ -616,8 +766,41 @@ impl DroidPathMcpServerCore {
                     )
                     .await
                 {
-                    Ok(outcome) => Ok(Self::format_navigation_outcome(&outcome)),
-                    Err(deviation) => Ok(Self::format_path_deviation_result(&deviation)),
+                    Ok(outcome) => {
+                        let mut res = Self::format_navigation_outcome(&outcome);
+                        let fb_code = match &outcome {
+                            ShadowNavigationOutcome::NoRoute { .. } => Some("no_route"),
+                            ShadowNavigationOutcome::TargetNotFound { .. } => {
+                                Some("target_not_found")
+                            }
+                            ShadowNavigationOutcome::Explored(
+                                ExploreOutcome::NeedsSelection { .. },
+                            ) => Some("element_not_found"),
+                            _ => None,
+                        };
+                        if let Some(code) = fb_code {
+                            let fb = self
+                                .build_live_feedback(
+                                    code,
+                                    target_for_fb.as_deref(),
+                                    pre_index.as_deref(),
+                                )
+                                .await;
+                            res = Self::attach_feedback_to_result(res, &fb);
+                        }
+                        Ok(res)
+                    }
+                    Err(deviation) => {
+                        let res = Self::format_path_deviation_result(&deviation);
+                        let fb = self
+                            .build_live_feedback(
+                                "route_deviation",
+                                target_for_fb.as_deref(),
+                                pre_index.as_deref(),
+                            )
+                            .await;
+                        Ok(Self::attach_feedback_to_result(res, &fb))
+                    }
                 }
             }
 
@@ -635,6 +818,7 @@ impl DroidPathMcpServerCore {
                     get_i32("step_timeout_ms").unwrap_or(2000).clamp(250, 10_000) as u64;
                 let confirmed = get_bool("confirmed").unwrap_or(false);
                 let prefer_graph_route = get_bool("prefer_graph_route").unwrap_or(true);
+                let pre_index = self.manager.bridge.dom_state.current_index().await;
 
                 match self
                     .manager
@@ -650,8 +834,31 @@ impl DroidPathMcpServerCore {
                     )
                     .await
                 {
-                    Ok(outcome) => Ok(Self::format_explore_outcome(&outcome)),
-                    Err(deviation) => Ok(Self::format_path_deviation_result(&deviation)),
+                    Ok(outcome) => {
+                        let mut res = Self::format_explore_outcome(&outcome);
+                        if matches!(outcome, ExploreOutcome::NeedsSelection { .. }) {
+                            let fb = self
+                                .build_live_feedback(
+                                    "element_not_found",
+                                    Some(target),
+                                    pre_index.as_deref(),
+                                )
+                                .await;
+                            res = Self::attach_feedback_to_result(res, &fb);
+                        }
+                        Ok(res)
+                    }
+                    Err(deviation) => {
+                        let res = Self::format_path_deviation_result(&deviation);
+                        let fb = self
+                            .build_live_feedback(
+                                "route_deviation",
+                                Some(target),
+                                pre_index.as_deref(),
+                            )
+                            .await;
+                        Ok(Self::attach_feedback_to_result(res, &fb))
+                    }
                 }
             }
 
@@ -703,6 +910,7 @@ impl DroidPathMcpServerCore {
                 }
 
                 self.manager.ensure_started(Some(&serial), false).await;
+                let pre_index = self.manager.bridge.dom_state.current_index().await;
                 if !self.manager.bridge.ensure_shadow_stream_ready(0.8, 15.0).await {
                     let port = self.manager.bridge.client.configuration().port;
                     if port > 0 {
@@ -739,7 +947,16 @@ impl DroidPathMcpServerCore {
                 }
 
                 let Some(m) = resolved else {
-                    return Ok(McpToolResult::text("No matching UI element found.", true));
+                    let query = text_q.or(desc_q).or(id_q);
+                    let fb = self
+                        .build_live_feedback("element_not_found", query, pre_index.as_deref())
+                        .await;
+                    let payload = json!({
+                        "status": "element_not_found",
+                        "message": "No matching UI element found.",
+                        "feedback": fb
+                    });
+                    return Ok(McpToolResult::text(payload.to_string(), true));
                 };
 
                 let target_desc = if !m.text.is_empty() {
@@ -926,6 +1143,35 @@ impl DroidPathMcpServerCore {
 
             other => Ok(McpToolResult::text(format!("Unknown tool '{other}'."), true)),
         }
+    }
+
+    async fn build_live_feedback(
+        &self,
+        failure_code: &str,
+        requested_target: Option<&str>,
+        previous_index: Option<&crate::shadow_dom::ShadowTreeIndex>,
+    ) -> AgenticFeedback {
+        let current_index = self.manager.bridge.dom_state.current_index().await;
+        let is_secure = self.manager.bridge.dom_state.is_secure_screen_active().await;
+        AgenticFeedbackBuilder::build(
+            failure_code,
+            requested_target,
+            previous_index,
+            current_index.as_deref(),
+            is_secure,
+        )
+    }
+
+    fn attach_feedback_to_result(mut result: McpToolResult, feedback: &AgenticFeedback) -> McpToolResult {
+        if let Ok(mut val) = serde_json::from_str::<Value>(&result.text) {
+            if let Some(obj) = val.as_object_mut() {
+                if let Ok(fb_val) = serde_json::to_value(feedback) {
+                    obj.insert("feedback".to_string(), fb_val);
+                    result.text = val.to_string();
+                }
+            }
+        }
+        result
     }
 
     fn find_matching_compact(

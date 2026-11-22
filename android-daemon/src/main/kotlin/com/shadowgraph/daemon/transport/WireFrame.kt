@@ -60,6 +60,21 @@ data class WireInputResult(
     val timestampMs: Long
 )
 
+data class WireVisionFrame(
+    val id: Long,
+    val ok: Boolean,
+    val mimeType: String = "image/jpeg",
+    val width: Int = 0,
+    val height: Int = 0,
+    val quality: Int = 50,
+    val byteLength: Int = 0,
+    val dataBase64: String? = null,
+    val blockedReason: String? = null,
+    val error: String? = null,
+    val elapsedMs: Long = 0L,
+    val timestampMs: Long = 0L
+)
+
 sealed class InboundCommand {
     data object Snapshot : InboundCommand()
     data object Ping : InboundCommand()
@@ -76,6 +91,11 @@ sealed class InboundCommand {
         val holdMs: Long
     ) : InboundCommand()
     data class Keyevent(val id: Long, val keycode: Int) : InboundCommand()
+    data class CaptureVision(
+        val id: Long,
+        val maxWidth: Int,
+        val quality: Int
+    ) : InboundCommand()
     data class Unknown(
         val raw: String,
         val reason: String,

@@ -37,6 +37,10 @@ impl WireHelloPayload {
     pub fn supports_native_input(&self) -> bool {
         self.capabilities.iter().any(|c| c == "input")
     }
+
+    pub fn supports_hybrid_vision(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "hybrid_vision")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +200,36 @@ pub struct WireInputResultPayload {
     pub timestamp_ms: i64,
 }
 
+fn default_jpeg_mime() -> String {
+    "image/jpeg".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireVisionFramePayload {
+    pub id: u64,
+    pub ok: bool,
+    #[serde(default = "default_jpeg_mime")]
+    pub mime_type: String,
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
+    #[serde(default)]
+    pub quality: i32,
+    #[serde(default)]
+    pub byte_length: usize,
+    #[serde(default)]
+    pub data_base64: Option<String>,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub elapsed_ms: i64,
+    #[serde(rename = "ts_ms", default)]
+    pub timestamp_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireMessage {
     Hello(WireHelloPayload),
@@ -206,6 +240,7 @@ pub enum WireMessage {
     Pong(WirePongPayload),
     SecureScreen(WireSecureScreenPayload),
     InputResult(WireInputResultPayload),
+    VisionFrame(WireVisionFramePayload),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,5 +268,10 @@ pub enum DaemonCommand {
     Keyevent {
         id: u64,
         keycode: i32,
+    },
+    CaptureVision {
+        id: u64,
+        max_width: i32,
+        quality: i32,
     },
 }

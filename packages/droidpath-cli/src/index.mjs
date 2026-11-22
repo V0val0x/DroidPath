@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import {
   bundledDaemonJarPath,
@@ -45,6 +48,7 @@ COMMANDS:
                         Antigravity, LM Studio, Ollama/OpenWebUI/Local AI)
   rules                 Install/update idempotent agent rules (.cursorrules, CLAUDE.md, GEMINI.md,
                         .agent/rules/droidpath.md, local OpenAI tool schemas & compact system prompt)
+  schemas               Export standardized JSON tool schemas (OpenAI, Anthropic, MCP, or all)
   daemon <action>       Manage Android Shadow DOM daemon: deploy | start | stop | status
   mcp                   Launch native Rust droidpath-mcp server (--stdio or --http) with auto-daemon inject
   hud                   Launch cross-platform Tauri Desktop HUD
@@ -52,14 +56,16 @@ COMMANDS:
 
 OPTIONS:
   --serial <id>         Target ADB device serial (auto-selects first authorized device)
-  --daemon-port <port>  Shadow DOM daemon TCP forward port (default: 27189)
+  --daemon-port <port>  Shadow DOM daemon TCP forward port; 0 = dynamic ephemeral port (default: 27189)
+  --headless            Enable headless Docker-Android emulator boot wait & connect retries
   --jar <path>          Custom path to android-daemon.jar (defaults to bundled JAR)
   --client <name>       Target client(s): cursor | claude | claude-code | gemini | antigravity |
                         lm-studio | ollama | openwebui | local | all (comma-separated, default: all)
   --no-rules            Skip installing agent rule files during 'init'
   --dir <path>          Workspace directory for project rule files (default: cwd)
   --global              Also install global user-level rules (~/.gemini/GEMINI.md, ~/.claude/CLAUDE.md)
-  --format <fmt>        For 'rules': print to stdout instead of writing (rules | prompt | local | openai)
+  --format <fmt>        For 'rules': rules|prompt|local|openai; for 'schemas': openai|anthropic|mcp|all
+  --out <path>          Write exported JSON schemas to a file instead of stdout
   --http                Use HTTP/SSE transport instead of stdio
   --stdio               Use stdio JSON-RPC transport (default for mcp)
   --port <port>         HTTP/SSE listen port (default: 8766)
@@ -89,6 +95,8 @@ export function parseCliArgs(argv) {
     dir: null,
     global: false,
     format: null,
+    out: null,
+    headless: false,
     http: false,
     stdio: false,
     configure: false,
@@ -126,8 +134,8 @@ export function parseCliArgs(argv) {
         break;
       case "--daemon-port": {
         const parsed = Number.parseInt(requireFlagValue("--daemon-port", ++i), 10);
-        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-          throw new Error("Invalid value for --daemon-port (expected 1-65535).");
+        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+          throw new Error("Invalid value for --daemon-port (expected 0-65535).");
         }
         flags.daemonPort = parsed;
         break;
@@ -165,6 +173,12 @@ export function parseCliArgs(argv) {
       case "--format":
         flags.format = requireFlagValue("--format", ++i);
         break;
+      case "--out":
+        flags.out = requireFlagValue("--out", ++i);
+        break;
+      case "--headless":
+        flags.headless = true;
+        break;
       case "--http":
         flags.http = true;
         break;
@@ -196,6 +210,56 @@ export function parseCliArgs(argv) {
   }
 
   return { positional, flags };
+}
+
+export function loadToolSchemas(format = "all") {
+  const fmt = (format || "all").trim().toLowerCase();
+  const candidateDirs = [
+    path.resolve(__dirname, "../assets/schemas"),
+    path.resolve(__dirname, "../../../schemas"),
+  ];
+  const readJson = (filename) => {
+    for (const dir of candidateDirs) {
+      const p = path.join(dir, filename);
+      if (existsSync(p)) {
+        return JSON.parse(readFileSync(p, "utf8"));
+      }
+    }
+    return null;
+  };
+
+  const openai = readJson("openai-tools.json") ?? buildOpenAIToolSchemas();
+  const anthropic =
+    readJson("anthropic-tools.json") ??
+    openai.map((item) => ({
+      name: item.function.name,
+      description: item.function.description,
+      input_schema: item.function.parameters,
+    }));
+  const mcp =
+    readJson("mcp-tools.json") ?? {
+      tools: anthropic.map((item) => ({
+        name: item.name,
+        description: item.description,
+        inputSchema: item.input_schema,
+      })),
+    };
+
+  if (fmt === "openai") return openai;
+  if (fmt === "anthropic" || fmt === "claude") return anthropic;
+  if (fmt === "mcp") return mcp;
+  if (fmt === "all" || fmt === "bundle") {
+    return {
+      schema_version: "1.0",
+      server: "droidpath-mcp",
+      cli_version: CLI_VERSION,
+      tool_count: openai.length,
+      openai,
+      anthropic,
+      mcp,
+    };
+  }
+  throw new Error(`Invalid schema format '${format}' (expected: openai | anthropic | mcp | all).`);
 }
 
 export function expandClients(clientArg) {
@@ -274,6 +338,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
   const jarPath = flags.jar || bundledDaemonJarPath();
   const projectDir = flags.dir ? path.resolve(flags.dir) : process.cwd();
   const homeDir = os.homedir();
+  const headless = flags.headless || process.env.DROIDPATH_HEADLESS === "1";
 
   try {
     if (command === "start" || command === "up") {
@@ -281,6 +346,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
         serial: flags.serial || undefined,
         port: flags.daemonPort,
         jarPath,
+        headless,
         logger: flags.json ? () => {} : (m) => io.err(`[DroidPath] ${m}`),
       });
 
@@ -293,7 +359,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
           binaryPath,
           jarPath,
           port: flags.port,
-          daemonPort: flags.daemonPort,
+          daemonPort: report.port,
         });
         const clients = expandClients(flags.client);
         for (const client of clients) {
@@ -368,6 +434,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
           serial: flags.serial || undefined,
           port: flags.daemonPort,
           jarPath,
+          headless,
           logger: flags.json ? () => {} : (m) => io.err(`[DroidPath] ${m}`),
         });
       }
@@ -455,6 +522,7 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
           serial: flags.serial || undefined,
           port: flags.daemonPort,
           jarPath,
+          headless,
           logger: flags.json ? () => {} : (m) => io.err(`[DroidPath] ${m}`),
         });
         io.out(
@@ -498,18 +566,24 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
     }
 
     if (command === "mcp") {
+      let effectiveDaemonPort = flags.daemonPort;
       if (!flags.noAutoDeploy) {
-        const alreadyUp = await checkTcpPort("127.0.0.1", flags.daemonPort, 250);
+        const alreadyUp =
+          effectiveDaemonPort > 0 && (await checkTcpPort("127.0.0.1", effectiveDaemonPort, 250));
         if (!alreadyUp) {
           try {
             const devices = listDevices();
             if (devices.length > 0) {
-              await deployDaemon({
+              const deployed = await deployDaemon({
                 serial: flags.serial || devices[0].serial,
-                port: flags.daemonPort,
+                port: effectiveDaemonPort,
                 jarPath,
+                headless,
                 logger: (m) => io.err(`[DroidPath] ${m}`),
               });
+              if (deployed && Number.isInteger(deployed.port) && deployed.port > 0) {
+                effectiveDaemonPort = deployed.port;
+              }
             }
           } catch (err) {
             io.err(`[DroidPath] Auto-deploy skipped: ${err.message}`);
@@ -527,19 +601,42 @@ export async function runCli(argv, io = { out: console.log, err: console.error }
 
       const childArgs = [flags.http ? "--http" : "--stdio"];
       if (flags.http) childArgs.push("--port", String(flags.port));
-      childArgs.push("--daemon-port", String(flags.daemonPort));
+      childArgs.push("--daemon-port", String(effectiveDaemonPort));
       if (jarPath) childArgs.push("--daemon-jar", jarPath);
       if (flags.authToken) childArgs.push("--auth-token", flags.authToken);
       if (flags.graphPath) childArgs.push("--graph-path", flags.graphPath);
 
+      const childEnv = headless
+        ? { ...process.env, DROIDPATH_HEADLESS: "1" }
+        : process.env;
+
       return await new Promise((resolve) => {
-        const child = spawn(binPath, childArgs, { stdio: "inherit" });
+        const child = spawn(binPath, childArgs, { stdio: "inherit", env: childEnv });
         child.on("exit", (code) => resolve(code ?? 0));
         child.on("error", (err) => {
           io.err(`Failed to launch ${binPath}: ${err.message}`);
           resolve(1);
         });
       });
+    }
+
+    if (command === "schemas") {
+      const fmt = flags.format || "all";
+      const payload = loadToolSchemas(fmt);
+      const rendered = `${JSON.stringify(payload, null, 2)}\n`;
+      if (flags.out) {
+        const outPath = path.resolve(flags.out);
+        mkdirSync(path.dirname(outPath), { recursive: true });
+        writeFileSync(outPath, rendered, "utf8");
+        if (flags.json) {
+          io.out(JSON.stringify({ ok: true, format: fmt, out: outPath }, null, 2));
+        } else {
+          io.out(`✅ Exported ${fmt} tool schemas -> ${outPath}`);
+        }
+      } else {
+        io.out(rendered.trimEnd());
+      }
+      return 0;
     }
 
     if (command === "hud") {

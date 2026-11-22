@@ -7,5 +7,5 @@ pub use node::{ShadowCompactNode, ShadowTreeMatchMode, ShadowUINode};
 pub use wire::{
     DaemonCommand, ShadowPatchMask, WireDiffPayload, WireErrorPayload, WireHeartbeatPayload,
     WireHelloPayload, WireInputResultPayload, WireMessage, WireNodePatch, WirePongPayload,
-    WireSecureScreenPayload, WireSnapshotPayload,
+    WireSecureScreenPayload, WireSnapshotPayload, WireVisionFramePayload,
 };

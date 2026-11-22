@@ -73,16 +73,34 @@ export function resolveAdbPath(env = process.env, platform = process.platform) {
   return null;
 }
 
-export function runAdb(args, { adbPath = resolveAdbPath(), timeoutMs = 8000 } = {}) {
+export function allocateEphemeralPort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+export function runAdb(args, { adbPath = resolveAdbPath(), timeoutMs = 8000, env = process.env } = {}) {
   if (!adbPath) {
     throw new Error(
       "ADB executable not found. Install android-platform-tools or set ANDROID_HOME / DROIDPATH_ADB_PATH."
     );
   }
+  const childEnv = { ...env };
+  if (!childEnv.ADB_SERVER_SOCKET && childEnv.DROIDPATH_ADB_SERVER_SOCKET) {
+    childEnv.ADB_SERVER_SOCKET = childEnv.DROIDPATH_ADB_SERVER_SOCKET;
+  }
   const res = spawnSync(adbPath, args, {
     encoding: "utf8",
     timeout: timeoutMs,
     windowsHide: true,
+    env: childEnv,
   });
   if (res.error) {
     throw new Error(`Failed to invoke adb: ${res.error.message}`);
@@ -169,6 +187,29 @@ export function checkTcpPort(host, port, timeoutMs = 400) {
   });
 }
 
+export async function waitForBootCompleted(
+  serial,
+  { adbPath = resolveAdbPath(), execAdb = runAdb, timeoutMs = 30000, pollIntervalMs = 500 } = {}
+) {
+  if (!validateSerial(serial)) throw new Error(`Invalid ADB serial '${serial}'`);
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  while (Date.now() < deadline) {
+    try {
+      const out = execAdb(["-s", serial, "shell", "getprop", "sys.boot_completed"], {
+        adbPath,
+        timeoutMs: 3000,
+      });
+      if (String(out || "").trim() === "1") {
+        return true;
+      }
+    } catch {
+      // Emulator adbd may still be starting up
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  return false;
+}
+
 export async function deployDaemon({
   serial,
   port = 27189,
@@ -176,16 +217,28 @@ export async function deployDaemon({
   debounceMs = 20,
   maxDepth = 48,
   heartbeatMs = 5000,
+  headless = process.env.DROIDPATH_HEADLESS === "1",
+  bootTimeoutMs = 30000,
   adbPath = resolveAdbPath(),
   execAdb = runAdb,
   logger = () => {},
 } = {}) {
+  const effectivePort = port === 0 ? await allocateEphemeralPort() : port;
   const resolvedSerial = serial
     ? (() => {
         if (!validateSerial(serial)) throw new Error(`Invalid ADB serial '${serial}'`);
         return serial.trim();
       })()
     : resolveTargetSerial(undefined, { adbPath });
+
+  if (headless) {
+    logger(`Waiting for sys.boot_completed=1 on ${resolvedSerial} (headless mode)...`);
+    await waitForBootCompleted(resolvedSerial, {
+      adbPath,
+      execAdb,
+      timeoutMs: bootTimeoutMs,
+    });
+  }
 
   let pushed = false;
   let sha256 = null;
@@ -248,15 +301,16 @@ export async function deployDaemon({
   }
 
   // Forward loopback TCP port
-  execAdb(["-s", resolvedSerial, "forward", `tcp:${port}`, `tcp:${port}`], {
+  execAdb(["-s", resolvedSerial, "forward", `tcp:${effectivePort}`, `tcp:${effectivePort}`], {
     adbPath,
     timeoutMs: 3000,
   });
 
   // Launch detached via app_process
+  const headlessFlags = headless ? " --wait-boot --connect-retries=12" : " --connect-retries=8";
   const daemonCmd =
     `env CLASSPATH='${REMOTE_DAEMON_JAR}' app_process / com.shadowgraph.daemon.DaemonMain ` +
-    `--port=${port} --debounce-ms=${debounceMs} --max-depth=${maxDepth} --heartbeat-ms=${heartbeatMs} --no-stdin-watchdog`;
+    `--port=${effectivePort} --debounce-ms=${debounceMs} --max-depth=${maxDepth} --heartbeat-ms=${heartbeatMs} --no-stdin-watchdog${headlessFlags}`;
   const launchCmd =
     `rm -f '${REMOTE_DAEMON_LOG}'; ` +
     `if command -v setsid >/dev/null 2>&1; then ` +
@@ -269,7 +323,7 @@ export async function deployDaemon({
     `if grep -q 'SHADOWGRAPH_DAEMON_READY' '${REMOTE_DAEMON_LOG}' 2>/dev/null; then echo READY; ` +
     `elif grep -q 'Fatal startup error' '${REMOTE_DAEMON_LOG}' 2>/dev/null; then echo FAILED; fi`;
 
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + (headless ? 10000 : 5000);
   while (Date.now() < deadline) {
     let statusOut = "";
     try {
@@ -283,7 +337,7 @@ export async function deployDaemon({
     if (statusOut.includes("READY")) {
       return {
         serial: resolvedSerial,
-        port,
+        port: effectivePort,
         jarPath,
         sha256,
         pushed,

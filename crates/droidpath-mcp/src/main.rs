@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use droidpath_core::{
     DroidPathAdbRunner, DroidPathHttpServer, DroidPathManager, DroidPathMcpServerCore,
-    DroidPathPersistenceCoordinator, DroidPathStdioTransport, ScrcpyBridge,
+    DroidPathPersistenceCoordinator, DroidPathStdioTransport, ScrcpyBridge, ToolSchemaExporter,
+    ToolSchemaFormat,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,12 +39,14 @@ enum CommandMode {
     Devices,
     Stats,
     Doctor,
+    Schemas { format: ToolSchemaFormat },
     Help,
     Version,
 }
 
 struct CliConfig {
     mode: CommandMode,
+    bind_host: String,
     port: u16,
     daemon_port: u16,
     graph_path: PathBuf,
@@ -65,16 +68,20 @@ SUBCOMMANDS:
   devices                 List connected USB & Wireless ADB Android devices (JSON)
   stats                   Show persisted Spatial Graph telemetry (JSON)
   doctor                  Run environment & device diagnostics (ADB, daemon JAR, TCP :27189, scrcpy)
+  schemas                 Export standardized JSON tool schemas (OpenAI, Anthropic, MCP, or all)
 
 OPTIONS:
   --stdio                 Run JSON-RPC 2.0 MCP server over stdin/stdout (default)
-  --http                  Run loopback HTTP/SSE MCP server on 127.0.0.1:<port>
+  --http                  Run HTTP/SSE MCP server (default bind: 127.0.0.1:<port>)
+  --bind-host <addr>      HTTP/SSE bind address; non-loopback requires --auth-token (default: 127.0.0.1, or DROIDPATH_BIND_HOST)
   --port <port>           HTTP/SSE listen port (default: 8766)
-  --daemon-port <port>    Android Shadow DOM daemon TCP forward port (default: 27189)
+  --daemon-port <port>    Android Shadow DOM daemon TCP forward port; 0 = dynamic ephemeral port (default: 27189)
+  --format <fmt>          Schema export format for 'schemas': openai | anthropic | mcp | all (default: all)
+  --export-schemas <fmt>  Shorthand to export JSON tool schemas and exit (openai | anthropic | mcp | all)
   --serial <serial>       Target ADB device serial (for deploy / stop-daemon)
   --graph-path <path>     Spatial Graph JSON persistence path (default: ~/.droidpath/shadow_graph.json)
   --daemon-jar <path>     Path to single-DEX android-daemon.jar
-  --auth-token <token>    Optional Bearer token required on HTTP/SSE requests
+  --auth-token <token>    Optional Bearer token required on HTTP/SSE requests (mandatory for non-loopback --bind-host)
   -v, --version           Print version
   -h, --help              Show this help
 "#,
@@ -83,8 +90,20 @@ OPTIONS:
 }
 
 fn parse_args(args: &[String]) -> Result<CliConfig, String> {
+    let env_bind_host = std::env::var("DROIDPATH_BIND_HOST").ok();
+    parse_args_with_env(args, env_bind_host.as_deref())
+}
+
+fn parse_args_with_env(args: &[String], env_bind_host: Option<&str>) -> Result<CliConfig, String> {
+    let default_bind_host = env_bind_host
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("127.0.0.1")
+        .to_string();
+
     let mut cfg = CliConfig {
         mode: CommandMode::Stdio,
+        bind_host: default_bind_host,
         port: 8766,
         daemon_port: 27189,
         graph_path: DroidPathPersistenceCoordinator::default_storage_path(),
@@ -94,16 +113,51 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
 
     let mut serial: Option<String> = None;
     let mut subcommand: Option<&str> = None;
+    let mut schema_format = ToolSchemaFormat::All;
     let mut i = 1;
 
     while i < args.len() {
         let arg = args[i].as_str();
         match arg {
-            "deploy" | "stop-daemon" | "devices" | "stats" | "doctor" if subcommand.is_none() => {
+            "deploy" | "stop-daemon" | "devices" | "stats" | "doctor" | "schemas"
+                if subcommand.is_none() =>
+            {
                 subcommand = Some(arg);
             }
             "--stdio" => cfg.mode = CommandMode::Stdio,
             "--http" => cfg.mode = CommandMode::Http,
+            "--bind-host" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| "Missing value for --bind-host".to_string())?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err("--bind-host must not be empty".to_string());
+                }
+                cfg.bind_host = trimmed.to_string();
+                i += 1;
+            }
+            "--format" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| "Missing value for --format".to_string())?;
+                schema_format = ToolSchemaFormat::parse(raw).ok_or_else(|| {
+                    format!("Invalid --format '{raw}' (expected: openai | anthropic | mcp | all)")
+                })?;
+                i += 1;
+            }
+            "--export-schemas" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| "Missing value for --export-schemas".to_string())?;
+                schema_format = ToolSchemaFormat::parse(raw).ok_or_else(|| {
+                    format!("Invalid --export-schemas '{raw}' (expected: openai | anthropic | mcp | all)")
+                })?;
+                cfg.mode = CommandMode::Schemas {
+                    format: schema_format,
+                };
+                return Ok(cfg);
+            }
             "--port" => {
                 let raw = args
                     .get(i + 1)
@@ -124,9 +178,6 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
                 let p: u16 = raw
                     .parse()
                     .map_err(|_| format!("Invalid value for --daemon-port: '{raw}'"))?;
-                if p == 0 {
-                    return Err("--daemon-port must be > 0".to_string());
-                }
                 cfg.daemon_port = p;
                 i += 1;
             }
@@ -180,6 +231,9 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
             "devices" => CommandMode::Devices,
             "stats" => CommandMode::Stats,
             "doctor" => CommandMode::Doctor,
+            "schemas" => CommandMode::Schemas {
+                format: schema_format,
+            },
             _ => unreachable!(),
         };
     }
@@ -187,10 +241,32 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
     Ok(cfg)
 }
 
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(ref mut s) = sigterm {
+                    s.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let cfg = match parse_args(&args) {
+    let mut cfg = match parse_args(&args) {
         Ok(c) => c,
         Err(err) => {
             DroidPathManager::log_stderr(&err);
@@ -207,7 +283,32 @@ async fn main() -> ExitCode {
             print!("{}", usage_text());
             return ExitCode::SUCCESS;
         }
+        CommandMode::Schemas { format } => {
+            let exported = ToolSchemaExporter::export(format);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&exported).unwrap_or_else(|_| "{}".to_string())
+            );
+            return ExitCode::SUCCESS;
+        }
         _ => {}
+    }
+
+    if cfg.daemon_port == 0 {
+        match DroidPathAdbRunner::allocate_ephemeral_port() {
+            Ok(p) => {
+                cfg.daemon_port = p;
+                DroidPathManager::log_stderr(&format!(
+                    "Allocated ephemeral daemon port 127.0.0.1:{p}"
+                ));
+            }
+            Err(err) => {
+                DroidPathManager::log_stderr(&format!(
+                    "Failed to allocate ephemeral daemon port: {err}"
+                ));
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     let adb = DroidPathAdbRunner::default();
@@ -348,11 +449,11 @@ async fn main() -> ExitCode {
             manager.load_persisted_graph_if_needed().await;
             let server_core = Arc::new(DroidPathMcpServerCore::new(Arc::clone(&manager)));
             let http = DroidPathHttpServer::new(server_core);
-            if let Err(err) = http.start(cfg.port, cfg.auth_token).await {
+            if let Err(err) = http.start_on(&cfg.bind_host, cfg.port, cfg.auth_token).await {
                 DroidPathManager::log_stderr(&format!("Failed to start HTTP server: {err}"));
                 return ExitCode::FAILURE;
             }
-            let _ = tokio::signal::ctrl_c().await;
+            wait_for_shutdown_signal().await;
             http.stop().await;
             let _ = tokio::time::timeout(std::time::Duration::from_millis(2500), manager.stop())
                 .await;
@@ -368,6 +469,47 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
 
-        CommandMode::Help | CommandMode::Version => unreachable!(),
+        CommandMode::Help | CommandMode::Version | CommandMode::Schemas { .. } => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vec_args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn default_bind_host_is_loopback() {
+        let cfg = parse_args_with_env(&vec_args(&["droidpath-mcp", "--http"]), None).unwrap();
+        assert_eq!(cfg.bind_host, "127.0.0.1");
+        assert!(matches!(cfg.mode, CommandMode::Http));
+    }
+
+    #[test]
+    fn env_bind_host_is_honored_and_overridden_by_cli_flag() {
+        let from_env =
+            parse_args_with_env(&vec_args(&["droidpath-mcp", "--http"]), Some("0.0.0.0")).unwrap();
+        assert_eq!(from_env.bind_host, "0.0.0.0");
+
+        let overridden = parse_args_with_env(
+            &vec_args(&["droidpath-mcp", "--http", "--bind-host", "127.0.0.1"]),
+            Some("0.0.0.0"),
+        )
+        .unwrap();
+        assert_eq!(overridden.bind_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn empty_bind_host_is_rejected() {
+        let err = parse_args_with_env(
+            &vec_args(&["droidpath-mcp", "--http", "--bind-host", "   "]),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("--bind-host"));
     }
 }

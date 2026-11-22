@@ -4,7 +4,7 @@ use thiserror::Error;
 use super::wire::{
     DaemonCommand, WireDiffPayload, WireErrorPayload, WireHeartbeatPayload, WireHelloPayload,
     WireInputResultPayload, WireMessage, WirePongPayload, WireSecureScreenPayload,
-    WireSnapshotPayload,
+    WireSnapshotPayload, WireVisionFramePayload,
 };
 
 #[derive(Debug, Error)]
@@ -49,6 +49,7 @@ impl NdjsonWireCodec {
     const PREFIX_ERROR: &'static [u8] = br#"{"type":"error""#;
     const PREFIX_SECURE_SCREEN: &'static [u8] = br#"{"type":"secure_screen""#;
     const PREFIX_INPUT_RESULT: &'static [u8] = br#"{"type":"input_result""#;
+    const PREFIX_VISION_FRAME: &'static [u8] = br#"{"type":"vision_frame""#;
 
     pub fn new() -> Self {
         Self
@@ -93,6 +94,9 @@ impl NdjsonWireCodec {
         if Self::matches_prefix(data, Self::PREFIX_INPUT_RESULT) {
             return Some("input_result");
         }
+        if Self::matches_prefix(data, Self::PREFIX_VISION_FRAME) {
+            return Some("vision_frame");
+        }
         None
     }
 
@@ -121,6 +125,9 @@ impl NdjsonWireCodec {
             >(data)?)),
             "input_result" => Ok(WireMessage::InputResult(serde_json::from_slice::<
                 WireInputResultPayload,
+            >(data)?)),
+            "vision_frame" => Ok(WireMessage::VisionFrame(serde_json::from_slice::<
+                WireVisionFramePayload,
             >(data)?)),
             other => Err(WireCodecError::UnknownMessageType(other.to_string())),
         }
@@ -201,6 +208,18 @@ impl WireCodec for NdjsonWireCodec {
                     format!("{{\"cmd\":\"keyevent\",\"id\":{id},\"keycode\":{keycode}}}\n")
                         .into_bytes(),
                 )
+            }
+            DaemonCommand::CaptureVision {
+                id,
+                max_width,
+                quality,
+            } => {
+                let w = max_width.clamp(160, 1080);
+                let q = quality.clamp(10, 85);
+                Ok(format!(
+                    "{{\"cmd\":\"capture_vision\",\"id\":{id},\"max_width\":{w},\"quality\":{q}}}\n"
+                )
+                .into_bytes())
             }
         }
     }

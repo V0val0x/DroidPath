@@ -211,6 +211,9 @@ impl DroidPathAdbRunner {
     ) -> Result<Vec<u8>, DroidPathAdbError> {
         let adb_path = self.adb_binary_path().await?;
         let mut cmd = Command::new(&adb_path);
+        if let Some(socket) = Self::configured_server_socket() {
+            cmd.env("ADB_SERVER_SOCKET", &socket);
+        }
         cmd.args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -250,6 +253,49 @@ impl DroidPathAdbRunner {
     ) -> Result<String, DroidPathAdbError> {
         let bytes = self.execute_bytes(arguments, timeout_secs).await?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    pub fn configured_server_socket() -> Option<String> {
+        std::env::var("ADB_SERVER_SOCKET")
+            .ok()
+            .or_else(|| std::env::var("DROIDPATH_ADB_SERVER_SOCKET").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Allocates a guaranteed free loopback TCP port on `127.0.0.1` for parallel headless
+    /// emulator fleets so multiple `android-daemon` forwards never collide on `:27189`.
+    pub fn allocate_ephemeral_port() -> std::io::Result<u16> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        Ok(listener.local_addr()?.port())
+    }
+
+    /// Waits for `sys.boot_completed=1` on a target Android device or headless emulator.
+    pub async fn wait_for_boot_completed(
+        &self,
+        serial: &str,
+        timeout_secs: f64,
+    ) -> Result<(), DroidPathAdbError> {
+        if !Self::validate_serial(serial) {
+            return Err(DroidPathAdbError::InvalidSerial(serial.to_string()));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(timeout_secs.max(1.0));
+        loop {
+            if let Ok(out) = self
+                .execute(&["-s", serial, "shell", "getprop", "sys.boot_completed"], 3.0)
+                .await
+            {
+                if out.trim() == "1" {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(DroidPathAdbError::TimedOut {
+                    seconds: timeout_secs,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     pub async fn list_devices(&self) -> Result<Vec<DroidPathDevice>, DroidPathAdbError> {

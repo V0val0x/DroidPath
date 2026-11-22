@@ -172,6 +172,41 @@ class NdjsonWireEncoder : WireEncoder {
         out.appendAscii("}\n")
     }
 
+    override fun encodeVisionFrame(frame: WireVisionFrame, out: ByteArrayBuffer) {
+        out.reset()
+        out.appendAscii("{\"type\":\"vision_frame\",\"id\":")
+        out.appendLong(frame.id)
+        out.appendAscii(",\"ok\":")
+        out.appendBoolean(frame.ok)
+        out.appendAscii(",\"mime_type\":")
+        out.appendJsonString(frame.mimeType)
+        out.appendAscii(",\"width\":")
+        out.appendInt(frame.width)
+        out.appendAscii(",\"height\":")
+        out.appendInt(frame.height)
+        out.appendAscii(",\"quality\":")
+        out.appendInt(frame.quality)
+        out.appendAscii(",\"byte_length\":")
+        out.appendInt(frame.byteLength)
+        if (frame.dataBase64 != null) {
+            out.appendAscii(",\"data_base64\":")
+            out.appendJsonString(frame.dataBase64)
+        }
+        if (frame.blockedReason != null) {
+            out.appendAscii(",\"blocked_reason\":")
+            out.appendJsonString(frame.blockedReason)
+        }
+        if (frame.error != null) {
+            out.appendAscii(",\"error\":")
+            out.appendJsonString(frame.error)
+        }
+        out.appendAscii(",\"elapsed_ms\":")
+        out.appendLong(frame.elapsedMs)
+        out.appendAscii(",\"ts_ms\":")
+        out.appendLong(frame.timestampMs)
+        out.appendAscii("}\n")
+    }
+
     private fun appendFullNode(node: ShadowNode, out: ByteArrayBuffer) {
         out.appendAscii("{\"index\":")
         out.appendInt(node.index)

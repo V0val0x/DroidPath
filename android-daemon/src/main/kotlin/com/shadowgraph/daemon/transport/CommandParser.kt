@@ -1,6 +1,7 @@
 package com.shadowgraph.daemon.transport
 
 import com.shadowgraph.daemon.input.InputInjector
+import com.shadowgraph.daemon.vision.VisionCapturer
 import kotlin.math.roundToInt
 
 /**
@@ -52,6 +53,7 @@ object CommandParser {
             "tap" -> parseTap(line, fields)
             "swipe" -> parseSwipe(line, fields)
             "keyevent" -> parseKeyevent(line, fields)
+            "capture_vision" -> parseCaptureVision(line, fields)
             else -> InboundCommand.Unknown(line, "unknown_cmd:$cmd")
         }
     }
@@ -135,6 +137,34 @@ object CommandParser {
             return InboundCommand.Unknown(line, "keycode_out_of_range", id = replyId, cmd = "keyevent")
         }
         return InboundCommand.Keyevent(id = id, keycode = rawCode.toInt())
+    }
+
+    private fun parseCaptureVision(line: String, fields: Map<String, Any?>): InboundCommand {
+        val id = parseOptionalId(fields)
+            ?: return InboundCommand.Unknown(line, "invalid_id", cmd = "capture_vision")
+        val replyId = if (fields.containsKey("id") && fields["id"] != null) id else null
+
+        val maxWidth = if (!fields.containsKey("max_width") || fields["max_width"] == null) {
+            VisionCapturer.DEFAULT_MAX_WIDTH
+        } else {
+            val raw = fields["max_width"] as? Long
+                ?: return InboundCommand.Unknown(line, "invalid_max_width", id = replyId, cmd = "capture_vision")
+            VisionCapturer.clampMaxWidth(raw.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
+        }
+
+        val quality = if (!fields.containsKey("quality") || fields["quality"] == null) {
+            VisionCapturer.DEFAULT_QUALITY
+        } else {
+            val raw = fields["quality"] as? Long
+                ?: return InboundCommand.Unknown(line, "invalid_quality", id = replyId, cmd = "capture_vision")
+            VisionCapturer.clampQuality(raw.coerceIn(0L, 100L).toInt())
+        }
+
+        return InboundCommand.CaptureVision(
+            id = id,
+            maxWidth = maxWidth,
+            quality = quality
+        )
     }
 
     private fun parseFlatJsonObject(input: String): Map<String, Any?>? {

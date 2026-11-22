@@ -777,6 +777,16 @@ impl DroidPathManager {
         if !DroidPathAdbRunner::validate_serial(serial) {
             return Err(format!("Invalid ADB device serial '{serial}'."));
         }
+        let port = if port == 0 {
+            DroidPathAdbRunner::allocate_ephemeral_port()
+                .map_err(|e| format!("Failed to allocate ephemeral daemon port: {e}"))?
+        } else {
+            port
+        };
+        let headless = std::env::var("DROIDPATH_HEADLESS").as_deref() == Ok("1");
+        if headless {
+            let _ = self.adb_runner.wait_for_boot_completed(serial, 30.0).await;
+        }
         let remote_jar = "/data/local/tmp/android-daemon.jar";
         let remote_log = "/data/local/tmp/android-daemon.log";
 
@@ -840,9 +850,14 @@ impl DroidPathManager {
             .execute(&["-s", serial, "shell", kill_cmd], 4.0)
             .await;
 
+        let extra_flags = if headless {
+            " --wait-boot --connect-retries=12"
+        } else {
+            " --connect-retries=8"
+        };
         let daemon_cmd = format!(
             "env CLASSPATH='{remote_jar}' app_process / com.shadowgraph.daemon.DaemonMain \
-             --port={port} --debounce-ms=20 --max-depth=48 --heartbeat-ms=5000 --no-stdin-watchdog"
+             --port={port} --debounce-ms=20 --max-depth=48 --heartbeat-ms=5000 --no-stdin-watchdog{extra_flags}"
         );
         let launch_cmd = format!(
             "rm -f '{remote_log}'; \
@@ -857,7 +872,7 @@ impl DroidPathManager {
             .await
             .map_err(|e| format!("Failed to launch android-daemon: {e}"))?;
 
-        let ready_deadline = Instant::now() + Duration::from_secs(4);
+        let ready_deadline = Instant::now() + Duration::from_secs(if headless { 10 } else { 4 });
         let check_cmd = format!(
             "if grep -q 'SHADOWGRAPH_DAEMON_READY' '{remote_log}' 2>/dev/null; then echo READY; \
              elif grep -q 'Fatal startup error' '{remote_log}' 2>/dev/null; then echo FAILED; fi"

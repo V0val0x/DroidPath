@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile);
 const __testDir = path.dirname(fileURLToPath(import.meta.url));
 
 import {
+  allocateEphemeralPort,
   bundledDaemonJarPath,
   checkTcpPort,
   deployDaemon,
@@ -1240,4 +1241,83 @@ test("scripts/install.ps1 verifies 2-hop GitHub -> external S3 CDN redirects, ap
     cdnServer.close();
     rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("CLI schemas command exports OpenAI, Anthropic, MCP, and bundled JSON schemas", async () => {
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "droidpath-schemas-cli-"));
+  try {
+    for (const fmt of ["openai", "anthropic", "mcp", "all"]) {
+      const lines = [];
+      const code = await runCli(["schemas", "--format", fmt], {
+        out: (s) => lines.push(s),
+        err: () => {},
+      });
+      assert.equal(code, 0);
+      const parsed = JSON.parse(lines.join("\n"));
+      if (fmt === "openai") {
+        assert.equal(parsed.length, 9);
+        assert.equal(parsed[0].type, "function");
+      } else if (fmt === "anthropic") {
+        assert.equal(parsed.length, 9);
+        assert.ok(parsed[0].input_schema);
+      } else if (fmt === "mcp") {
+        assert.equal(parsed.tools.length, 9);
+      } else {
+        assert.equal(parsed.tool_count, 9);
+        assert.equal(parsed.openai.length, 9);
+        assert.equal(parsed.anthropic.length, 9);
+      }
+    }
+
+    const outFile = path.join(tmpDir, "out", "anthropic.json");
+    const code = await runCli(["schemas", "--format", "anthropic", "--out", outFile], {
+      out: () => {},
+      err: () => {},
+    });
+    assert.equal(code, 0);
+    const written = JSON.parse(readFileSync(outFile, "utf8"));
+    assert.equal(written.length, 9);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("headless allocateEphemeralPort and deployDaemon(port: 0, headless: true) work without port collisions", async () => {
+  const p = await allocateEphemeralPort();
+  assert.ok(Number.isInteger(p) && p >= 1024 && p <= 65535);
+
+  const calls = [];
+  let bootPolls = 0;
+  const fakeAdb = (args) => {
+    calls.push(args.join(" "));
+    if (args.includes("getprop") && args.includes("sys.boot_completed")) {
+      bootPolls += 1;
+      return bootPolls >= 2 ? "1\n" : "0\n";
+    }
+    if (args.includes("sha256sum")) return "";
+    if (args.some((a) => a.includes("SHADOWGRAPH_DAEMON_READY"))) return "READY\n";
+    return "";
+  };
+
+  const report = await deployDaemon({
+    serial: "emulator-5554",
+    port: 0,
+    headless: true,
+    bootTimeoutMs: 5000,
+    adbPath: "/usr/bin/adb",
+    execAdb: fakeAdb,
+  });
+  assert.equal(report.ready, true);
+  assert.ok(report.port >= 1024);
+  assert.equal(bootPolls, 2, "headless deployDaemon must poll sys.boot_completed until 1");
+  assert.ok(calls.some((c) => c.includes(`forward tcp:${report.port} tcp:${report.port}`)));
+  assert.ok(calls.some((c) => c.includes("--wait-boot --connect-retries=12")));
+
+  // Verify inline fallback buildOpenAIToolSchemas includes v2.3 hybrid vision properties
+  const inlineSchemas = buildOpenAIToolSchemas();
+  const uiTree = inlineSchemas.find((t) => t.function.name === "android_get_ui_tree");
+  assert.ok(uiTree, "android_get_ui_tree must exist in inline OpenAI schemas");
+  assert.equal(uiTree.function.parameters.properties.include_vision.default, false);
+  assert.equal(uiTree.function.parameters.properties.vision_max_width.default, 540);
+  assert.equal(uiTree.function.parameters.properties.vision_quality.default, 50);
 });

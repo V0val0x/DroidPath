@@ -21,6 +21,8 @@ import com.shadowgraph.daemon.transport.WireHello
 import com.shadowgraph.daemon.transport.WireInputResult
 import com.shadowgraph.daemon.transport.WirePong
 import com.shadowgraph.daemon.transport.WireSecureScreen
+import com.shadowgraph.daemon.transport.WireVisionFrame
+import com.shadowgraph.daemon.vision.VisionCapturer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -125,35 +127,43 @@ object DaemonMain {
             }
         }
 
-        fun submitInput(session: ClientSession, id: Long, cmdName: String, task: () -> Unit) {
-            if (shuttingDown.get() || inputWorker.isShutdown) {
+        fun sendWorkerError(session: ClientSession, id: Long, cmdName: String, errorCode: String) {
+            val nowMs = System.currentTimeMillis()
+            if (cmdName == "capture_vision") {
+                server.sendVisionFrame(
+                    session,
+                    WireVisionFrame(
+                        id = id,
+                        ok = false,
+                        error = errorCode,
+                        elapsedMs = 0L,
+                        timestampMs = nowMs
+                    )
+                )
+            } else {
                 server.sendInputResult(
                     session,
                     WireInputResult(
                         id = id,
                         cmd = cmdName,
                         ok = false,
-                        error = "daemon_shutting_down",
+                        error = errorCode,
                         elapsedMs = 0L,
-                        timestampMs = System.currentTimeMillis()
+                        timestampMs = nowMs
                     )
                 )
+            }
+        }
+
+        fun submitInput(session: ClientSession, id: Long, cmdName: String, task: () -> Unit) {
+            if (shuttingDown.get() || inputWorker.isShutdown) {
+                sendWorkerError(session, id, cmdName, "daemon_shutting_down")
                 return
             }
             try {
                 inputWorker.execute(task)
             } catch (_: RejectedExecutionException) {
-                server.sendInputResult(
-                    session,
-                    WireInputResult(
-                        id = id,
-                        cmd = cmdName,
-                        ok = false,
-                        error = "input_executor_rejected",
-                        elapsedMs = 0L,
-                        timestampMs = System.currentTimeMillis()
-                    )
-                )
+                sendWorkerError(session, id, cmdName, "input_executor_rejected")
             }
         }
 
@@ -268,7 +278,7 @@ object DaemonMain {
                         sdkInt = Build.VERSION.SDK_INT,
                         deviceModel = Build.MODEL ?: "Android",
                         daemonPid = Process.myPid().toLong(),
-                        capabilities = listOf("input")
+                        capabilities = listOf("input", "hybrid_vision")
                     )
                     server.sendHello(session, hello)
                     submitWorker {
@@ -411,9 +421,49 @@ object DaemonMain {
                                 )
                             }
                         }
+                        is InboundCommand.CaptureVision -> {
+                            submitInput(session, command.id, "capture_vision") {
+                                val isSecure = secureScreenActive.get() ||
+                                    (currentSnapshot.get()?.secureScreenActive == true)
+                                val res = VisionCapturer.capture(
+                                    uia = host.uiAutomation,
+                                    isSecureScreenActive = isSecure,
+                                    maxWidth = command.maxWidth,
+                                    quality = command.quality
+                                )
+                                server.sendVisionFrame(
+                                    session,
+                                    WireVisionFrame(
+                                        id = command.id,
+                                        ok = res.ok,
+                                        mimeType = res.mimeType,
+                                        width = res.width,
+                                        height = res.height,
+                                        quality = res.quality,
+                                        byteLength = res.byteLength,
+                                        dataBase64 = res.dataBase64,
+                                        blockedReason = res.blockedReason,
+                                        error = res.error,
+                                        elapsedMs = res.elapsedMs,
+                                        timestampMs = System.currentTimeMillis()
+                                    )
+                                )
+                            }
+                        }
                         is InboundCommand.Unknown -> {
                             val nowMs = System.currentTimeMillis()
-                            if (command.id != null && (command.cmd == "tap" || command.cmd == "swipe" || command.cmd == "keyevent")) {
+                            if (command.id != null && command.cmd == "capture_vision") {
+                                server.sendVisionFrame(
+                                    session,
+                                    WireVisionFrame(
+                                        id = command.id,
+                                        ok = false,
+                                        error = command.reason,
+                                        elapsedMs = 0L,
+                                        timestampMs = nowMs
+                                    )
+                                )
+                            } else if (command.id != null && (command.cmd == "tap" || command.cmd == "swipe" || command.cmd == "keyevent")) {
                                 server.sendInputResult(
                                     session,
                                     WireInputResult(

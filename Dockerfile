@@ -19,9 +19,11 @@ RUN cargo build --release --locked -p droidpath-mcp
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates adb \
+    && apt-get install -y --no-install-recommends ca-certificates adb curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home --home-dir /home/droidpath droidpath
+    && useradd --system --uid 10001 --create-home --home-dir /home/droidpath droidpath \
+    && mkdir -p /data \
+    && chown droidpath:droidpath /data
 
 COPY --from=builder /app/target/release/droidpath-mcp /usr/local/bin/droidpath-mcp
 COPY packages/droidpath-cli/assets/android-daemon.jar /usr/local/share/droidpath/android-daemon.jar

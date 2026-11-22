@@ -1,0 +1,65 @@
+services:
+  # Headless Android emulator (no VNC/UI required for autonomous AI agent fleets).
+  # Requires KVM (/dev/kvm) on Linux hosts. For Apple Silicon / CI without KVM,
+  # point ADB_SERVER_SOCKET at your host ADB server instead (see docs/headless-docker.md).
+  android-emulator-1:
+    image: budtmo/docker-android:emulator_14.0
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm
+    environment:
+      EMULATOR_DEVICE: "Samsung Galaxy S10"
+      WEB_VNC: "false"
+      APPIUM: "false"
+      EMULATOR_ADDITIONAL_ARGS: "-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect"
+    ports:
+      - "127.0.0.1:5555:5555"
+    healthcheck:
+      test: ["CMD-SHELL", "adb wait-for-device shell getprop sys.boot_completed | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  droidpath-agent-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      android-emulator-1:
+        condition: service_healthy
+    environment:
+      DROIDPATH_HEADLESS: "1"
+      # Connect to the emulator container's ADB daemon over Docker internal networking:
+      ADB_SERVER_SOCKET: "tcp:android-emulator-1:5037"
+    command:
+      - "--http"
+      # Bind all container interfaces so Docker bridge port-forwarding (127.0.0.1:8766:8766)
+      # reaches the server; non-loopback binds strictly require --auth-token.
+      - "--bind-host"
+      - "0.0.0.0"
+      - "--port"
+      - "8766"
+      # Ephemeral port (0) avoids TCP collisions when scaling parallel agent containers:
+      - "--daemon-port"
+      - "0"
+      - "--graph-path"
+      - "/data/shadow_graph.json"
+      - "--daemon-jar"
+      - "/usr/local/share/droidpath/android-daemon.jar"
+      - "--auth-token"
+      - "${DROIDPATH_AUTH_TOKEN:-changeme-local-token}"
+    ports:
+      - "127.0.0.1:8766:8766"
+    volumes:
+      - droidpath-graph-data:/data
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'Authorization: Bearer ${DROIDPATH_AUTH_TOKEN:-changeme-local-token}' http://127.0.0.1:8766/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  droidpath-graph-data:

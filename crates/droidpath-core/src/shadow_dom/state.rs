@@ -310,6 +310,10 @@ impl ShadowDomState {
                     self.secure_cleared_notify.notify_waiters();
                 }
             }
+
+            WireMessage::VisionFrame(_) => {
+                // Vision frames are correlated directly by DaemonTcpClient::request_vision_frame.
+            }
         }
     }
 

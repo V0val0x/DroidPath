@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::manager::DroidPathManager;
 
 use super::protocol::DroidPathMcpServerCore;
+use super::schemas::{ToolSchemaExporter, ToolSchemaFormat};
 
 // MARK: - Stdio Transport
 
@@ -87,14 +88,80 @@ impl DroidPathHttpServer {
         *self.bound_addr.lock().await
     }
 
+    pub fn is_loopback_bind_host(raw_host: &str) -> bool {
+        let trimmed = raw_host.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let clean = if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        if clean.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        clean
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+    }
+
     pub async fn start(
         &self,
         port: u16,
         require_auth_token: Option<String>,
     ) -> std::io::Result<u16> {
+        self.start_on("127.0.0.1", port, require_auth_token).await
+    }
+
+    pub async fn start_on(
+        &self,
+        bind_host: &str,
+        port: u16,
+        require_auth_token: Option<String>,
+    ) -> std::io::Result<u16> {
+        let trimmed_host = bind_host.trim();
+        if trimmed_host.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HTTP bind host must not be empty",
+            ));
+        }
+        let clean_host = if trimmed_host.starts_with('[') || trimmed_host.ends_with(']') {
+            if trimmed_host.starts_with('[')
+                && trimmed_host.ends_with(']')
+                && trimmed_host.len() > 2
+            {
+                &trimmed_host[1..trimmed_host.len() - 1]
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Malformed bracketed bind host: '{trimmed_host}'"),
+                ));
+            }
+        } else {
+            trimmed_host
+        };
+
+        let auth_token = require_auth_token
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+
+        if !Self::is_loopback_bind_host(clean_host) && auth_token.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Refusing to bind non-loopback address '{clean_host}' without a non-empty --auth-token"
+                ),
+            ));
+        }
+
         self.stop().await;
 
-        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+        let listener = TcpListener::bind((clean_host, port)).await?;
         let local_addr = listener.local_addr()?;
         let actual_port = local_addr.port();
         *self.bound_addr.lock().await = Some(local_addr);
@@ -102,7 +169,6 @@ impl DroidPathHttpServer {
 
         let server = Arc::clone(&self.server);
         let sessions = Arc::clone(&self.sse_sessions);
-        let auth_token = require_auth_token.unwrap_or_default();
 
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -117,7 +183,7 @@ impl DroidPathHttpServer {
 
         *self.accept_task.lock().await = Some(handle);
         DroidPathManager::log_stderr(&format!(
-            "droidpath-mcp HTTP/SSE server listening on http://127.0.0.1:{actual_port}/sse"
+            "droidpath-mcp HTTP/SSE server listening on http://{local_addr}/sse"
         ));
         Ok(actual_port)
     }
@@ -620,6 +686,31 @@ impl DroidPathHttpServer {
                 "200 OK",
                 "application/json",
                 health.as_bytes(),
+                allowed_origin,
+            )
+            .await;
+            return;
+        }
+
+        if method == "GET"
+            && matches!(
+                target_path.as_str(),
+                "/schemas" | "/schemas/openai.json" | "/schemas/anthropic.json" | "/schemas/mcp.json"
+            )
+        {
+            let format = match target_path.as_str() {
+                "/schemas/openai.json" => ToolSchemaFormat::OpenAi,
+                "/schemas/anthropic.json" => ToolSchemaFormat::Anthropic,
+                "/schemas/mcp.json" => ToolSchemaFormat::Mcp,
+                _ => ToolSchemaFormat::All,
+            };
+            let body = serde_json::to_vec_pretty(&ToolSchemaExporter::export(format))
+                .unwrap_or_else(|_| b"{}".to_vec());
+            Self::send_http_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                &body,
                 allowed_origin,
             )
             .await;

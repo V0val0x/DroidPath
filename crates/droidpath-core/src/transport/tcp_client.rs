@@ -15,6 +15,7 @@ use tokio::time::Instant;
 
 use crate::protocol::{
     DaemonCommand, NdjsonWireCodec, WireCodec, WireInputResultPayload, WireMessage,
+    WireVisionFramePayload,
 };
 
 use super::endpoint::{
@@ -37,6 +38,7 @@ struct ClientInner {
 }
 
 type InputWaiter = oneshot::Sender<Result<WireInputResultPayload, DaemonClientError>>;
+type VisionWaiter = oneshot::Sender<Result<WireVisionFramePayload, DaemonClientError>>;
 
 /// Persistent cross-platform Tokio TCP client for `android-daemon` (`127.0.0.1:27189`).
 /// Preserves strict TCP chunk framing order, detects silent dead connections via heartbeat
@@ -50,6 +52,7 @@ pub struct DaemonTcpClient {
     state_tx: broadcast::Sender<DaemonConnectionState>,
     next_input_id: AtomicU64,
     pending_inputs: Arc<std::sync::Mutex<HashMap<u64, InputWaiter>>>,
+    pending_vision: Arc<std::sync::Mutex<HashMap<u64, VisionWaiter>>>,
 }
 
 impl DaemonTcpClient {
@@ -78,6 +81,7 @@ impl DaemonTcpClient {
             state_tx,
             next_input_id: AtomicU64::new(1),
             pending_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_vision: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -227,6 +231,13 @@ impl DaemonTcpClient {
         )
     }
 
+    pub async fn supports_hybrid_vision(&self) -> bool {
+        matches!(
+            &*self.state_watch.read().await,
+            DaemonConnectionState::Connected { hello: Some(h) } if h.supports_hybrid_vision()
+        )
+    }
+
     /// Waits briefly for an in-progress handshake (`Connecting` or `Connected { hello: None }`)
     /// to deliver `WireHello` so cold-start MCP calls can use native TCP input instead of
     /// falling back to ADB while `hello` is still in flight. Returns immediately if already
@@ -335,6 +346,58 @@ impl DaemonTcpClient {
         .await
     }
 
+    pub async fn request_vision_frame(
+        &self,
+        max_width: i32,
+        quality: i32,
+        timeout: Duration,
+    ) -> Result<WireVisionFramePayload, DaemonClientError> {
+        if !self.supports_hybrid_vision().await {
+            let state = self.state_watch.read().await.clone();
+            return Err(match state {
+                DaemonConnectionState::Stopped => DaemonClientError::Stopped,
+                DaemonConnectionState::Connected { .. } => DaemonClientError::NotSupported,
+                _ => DaemonClientError::NotConnected,
+            });
+        }
+
+        struct PendingVisionGuard<'a> {
+            pending: &'a std::sync::Mutex<HashMap<u64, VisionWaiter>>,
+            id: u64,
+        }
+        impl Drop for PendingVisionGuard<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut guard) = self.pending.lock() {
+                    guard.remove(&self.id);
+                }
+            }
+        }
+
+        let id = self.next_input_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut guard) = self.pending_vision.lock() {
+            guard.insert(id, tx);
+        }
+        let _cleanup_guard = PendingVisionGuard {
+            pending: &self.pending_vision,
+            id,
+        };
+
+        self.send(DaemonCommand::CaptureVision {
+            id,
+            max_width: max_width.clamp(160, 1080),
+            quality: quality.clamp(10, 85),
+        })
+        .await?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(frame))) => Ok(frame),
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => Err(DaemonClientError::NotConnected),
+            Err(_) => Err(DaemonClientError::InputTimeout),
+        }
+    }
+
     async fn send_input_and_await(
         &self,
         id: u64,
@@ -397,22 +460,29 @@ impl DaemonTcpClient {
             Ok(mut guard) => guard.drain().map(|(_, tx)| tx).collect(),
             Err(poisoned) => poisoned.into_inner().drain().map(|(_, tx)| tx).collect(),
         };
-        for tx in waiters {
-            let err_clone = match &err {
-                DaemonClientError::Stopped => DaemonClientError::Stopped,
-                DaemonClientError::NotConnected => DaemonClientError::NotConnected,
-                DaemonClientError::NotSupported => DaemonClientError::NotSupported,
-                DaemonClientError::InputTimeout => DaemonClientError::InputTimeout,
-                DaemonClientError::SendFailed(s) => DaemonClientError::SendFailed(s.clone()),
-                DaemonClientError::InputFailed(s) => DaemonClientError::InputFailed(s.clone()),
-                DaemonClientError::InvalidEndpoint { host, port } => {
-                    DaemonClientError::InvalidEndpoint {
-                        host: host.clone(),
-                        port: *port,
-                    }
+        let clone_err = |e: &DaemonClientError| match e {
+            DaemonClientError::Stopped => DaemonClientError::Stopped,
+            DaemonClientError::NotConnected => DaemonClientError::NotConnected,
+            DaemonClientError::NotSupported => DaemonClientError::NotSupported,
+            DaemonClientError::InputTimeout => DaemonClientError::InputTimeout,
+            DaemonClientError::SendFailed(s) => DaemonClientError::SendFailed(s.clone()),
+            DaemonClientError::InputFailed(s) => DaemonClientError::InputFailed(s.clone()),
+            DaemonClientError::InvalidEndpoint { host, port } => {
+                DaemonClientError::InvalidEndpoint {
+                    host: host.clone(),
+                    port: *port,
                 }
-            };
-            let _ = tx.send(Err(err_clone));
+            }
+        };
+        for tx in waiters {
+            let _ = tx.send(Err(clone_err(&err)));
+        }
+        let vision_waiters: Vec<VisionWaiter> = match self.pending_vision.lock() {
+            Ok(mut guard) => guard.drain().map(|(_, tx)| tx).collect(),
+            Err(poisoned) => poisoned.into_inner().drain().map(|(_, tx)| tx).collect(),
+        };
+        for tx in vision_waiters {
+            let _ = tx.send(Err(clone_err(&err)));
         }
     }
 
@@ -621,6 +691,16 @@ impl DaemonTcpClient {
                             .and_then(|mut g| g.remove(&res.id));
                         if let Some(tx) = waiter {
                             let _ = tx.send(Ok(res.clone()));
+                        }
+                    }
+                    WireMessage::VisionFrame(frame) => {
+                        let waiter = self
+                            .pending_vision
+                            .lock()
+                            .ok()
+                            .and_then(|mut g| g.remove(&frame.id));
+                        if let Some(tx) = waiter {
+                            let _ = tx.send(Ok(frame.clone()));
                         }
                     }
                     _ => {}

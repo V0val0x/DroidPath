@@ -1,0 +1,336 @@
+{
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false,
+        "title": "Navigate to Android Screen or Node"
+      },
+      "description": "Computes and executes a shortest multi-step tap/swipe route to an Android screen or UI element using the persisted navigation graph without intermediate LLM calls. Use for known multi-screen workflows on the first connected ADB device (or device_serial); set auto_explore to true to fall back to live discovery if no cached route exists, or use android_explore_and_click for single-screen searches and android_tap_element for an already-visible control. Blocks until arrival, pauses with requires_confirmation on hazardous steps unless confirmed=true, and returns JSON with status (arrived, already_at_target, no_route, target_not_found, secure_screen_active, or path_deviation error), screen hashes, and executed steps.",
+      "inputSchema": {
+        "properties": {
+          "auto_explore": {
+            "default": false,
+            "description": "When true, automatically falls back to live scrolling discovery and graph recording if no cached route reaches the target. Default: false.",
+            "type": "boolean"
+          },
+          "confirmed": {
+            "default": false,
+            "description": "Must remain false unless re-invoking after explicit user confirmation in chat for a previously blocked hazardous action (payment, purchase, delete). Default: false.",
+            "type": "boolean"
+          },
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "max_steps": {
+            "default": 12,
+            "description": "Maximum navigation hops allowed across the graph before aborting (clamped to 1-30). Default: 12.",
+            "maximum": 30,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "step_timeout_ms": {
+            "default": 2000,
+            "description": "Blocking per-step UI settlement wait timeout in milliseconds while verifying screen transitions (clamped to 250-10000). Default: 2000.",
+            "maximum": 10000,
+            "minimum": 250,
+            "type": "integer"
+          },
+          "target": {
+            "description": "Target UI text, resource-id, Android package name, or screen title (e.g. 'Night Light', 'Display'). Provide at least one of target or target_hash.",
+            "type": "string"
+          },
+          "target_hash": {
+            "description": "Exact target layout hash in '0x...' hexadecimal or unsigned integer format. Optional alternative when target text is omitted.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "android_navigate_to_node"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false,
+        "title": "Discover and Click Android Element"
+      },
+      "description": "Finds and taps an Android UI element on the current screen (or via a 'Screen > Item' breadcrumb) using live accessibility scanning, bounded scrolling, and optional graph routing on the first connected ADB device or device_serial. Use when the target may require scrolling or is absent from the navigation graph; prefer android_navigate_to_node for learned multi-screen paths, android_tap_element for known coordinates or selectors, or android_get_ui_tree to inspect without acting. Blocks until completion, records new transitions to disk, gates hazardous actions behind requires_confirmation unless confirmed=true, and returns JSON with status (explored_and_clicked, arrived_via_graph, or top-20 PII-redacted candidates under needs_selection when no match meets threshold).",
+      "inputSchema": {
+        "properties": {
+          "confirmed": {
+            "default": false,
+            "description": "Must remain false unless re-invoking after explicit user confirmation in chat for a blocked hazardous/irreversible element. Default: false.",
+            "type": "boolean"
+          },
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "max_scrolls": {
+            "default": 3,
+            "description": "Maximum bounded list scrolls (down then up) during live search before returning candidates (clamped to 0-10). Default: 3.",
+            "maximum": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prefer_graph_route": {
+            "default": true,
+            "description": "When true, tries known graph routes before performing live on-screen scrolling search. Default: true.",
+            "type": "boolean"
+          },
+          "step_timeout_ms": {
+            "default": 2000,
+            "description": "Blocking per-step UI settlement wait in milliseconds after scrolls or route steps (clamped to 250-10000). Default: 2000.",
+            "maximum": 10000,
+            "minimum": 250,
+            "type": "integer"
+          },
+          "target": {
+            "description": "Non-empty target UI label, resource_id suffix, content_desc, or 'Screen > Item' breadcrumb path (e.g. 'Night Light', 'Display > Night Light').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "android_explore_and_click"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Read Live Android UI Tree"
+      },
+      "description": "Reads visible Android UI nodes from the live accessibility stream (falling back to uiautomator XML dump if the stream is cold) on the first connected ADB device or device_serial. Use for read-only UI inspection without touching the screen or modifying the navigation graph; prefer android_graph_stats for learned graph telemetry, or android_explore_and_click to locate and tap in a single call. Supports opt-in hybrid UI Tree + Vision streaming via include_vision=true (off by default, strictly blocked on FLAG_SECURE/biometric screens) to attach a heavily compressed JPEG screenshot alongside the structured UI tree for multimodal agents. Returns a JSON array of nodes (or a hybrid object + MCP image block when include_vision=true).",
+      "inputSchema": {
+        "properties": {
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "include_vision": {
+            "default": false,
+            "description": "Opt-in multimodal mode: when true, attaches a heavily compressed downscaled JPEG screenshot alongside the UI node tree as a second MCP image content block. Strictly disabled by default and automatically blocked on FLAG_SECURE / biometric screens.",
+            "type": "boolean"
+          },
+          "vision_max_width": {
+            "default": 540,
+            "description": "Maximum pixel width for the downscaled JPEG screenshot when include_vision is true (clamped to 160-1080). Default: 540.",
+            "maximum": 1080,
+            "minimum": 160,
+            "type": "integer"
+          },
+          "vision_quality": {
+            "default": 50,
+            "description": "JPEG compression quality (10-85) when include_vision is true. Lower values minimize multimodal token and bandwidth overhead. Default: 50.",
+            "maximum": 85,
+            "minimum": 10,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "android_get_ui_tree"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Get Spatial Graph Telemetry"
+      },
+      "description": "Returns a read-only telemetry snapshot of the persisted Android UI navigation graph without sending input to any device. Use before android_navigate_to_node to verify whether routes exist, inspect the active screen hash, or check accessibility daemon status; use android_get_ui_tree instead to inspect live UI elements on screen. Takes no arguments, executes locally without requiring an active device (reporting zero counts if no graph is learned yet), and returns JSON with vertex_count, seed_vertex_count, hydrated_vertex_count, edge_count, current_state_hash (0x hex or null), current_package, daemon_state, has_fresh_shadow_dom, and storage_path.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "android_graph_stats"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List Connected Android Devices"
+      },
+      "description": "Lists connected Android devices visible to ADB over USB or Wi-Fi without altering device state. Use in multi-device setups to obtain exact device_serial values for other Android tools; unnecessary when only one device is attached because action tools default to the first device. Runs quickly in read-only mode and returns a JSON array of objects with serial, model, and connection ('usb' or 'wifi'), or an error if ADB is unavailable.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "android_list_devices"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false,
+        "title": "Tap Android Element or Coordinates"
+      },
+      "description": "Taps the first connected Android device (or device_serial) at exact screen pixel coordinates (x, y from top-left (0, 0); takes precedence if paired with selectors) or by matching a visible element via text, resource_id, or content_desc. Use when coordinates or exact selectors on the current screen are already known; prefer android_explore_and_click for off-screen scrolling or fuzzy matching, and android_swipe for dragging/scrolling. Records the tap in the persisted navigation graph, blocks briefly during selector lookup and input injection, and returns confirmation text with tapped coordinates or an error if inputs are missing or no node matches.",
+      "inputSchema": {
+        "properties": {
+          "content_desc": {
+            "description": "Case-insensitive substring match against accessibility content-desc.",
+            "type": "string"
+          },
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "resource_id": {
+            "description": "Substring/suffix match against view resource-id (e.g. 'com.android.settings:id/search_bar').",
+            "type": "string"
+          },
+          "text": {
+            "description": "Case-insensitive text match against visible UI nodes (combined with resource_id/content_desc when multiple selectors are provided).",
+            "type": "string"
+          },
+          "x": {
+            "description": "Horizontal tap position in screen pixels from the left edge (top-left origin 0, 0). Requires y; takes precedence over text/id/desc selectors.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "y": {
+            "description": "Vertical tap position in screen pixels from the top edge (top-left origin 0, 0). Requires x; takes precedence over text/id/desc selectors.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "android_tap_element"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false,
+        "title": "Perform Android Touch Swipe"
+      },
+      "description": "Performs a blocking touch swipe from start (x1, y1) to end (x2, y2) in screen pixel coordinates (top-left origin (0, 0)) over duration_ms on the first connected ADB device or device_serial, and records the swipe edge in the navigation graph. Use for custom coordinate-based scrolling, dismissing panels, or dragging when start and end pixels are known; prefer android_explore_and_click to scroll and click a named list item automatically, android_tap_element for single taps, and android_navigate_to_node for learned paths. Blocks until the swipe finishes and returns confirmation text with coordinates and effective duration in ms, or an error if ADB fails.",
+      "inputSchema": {
+        "properties": {
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "duration_ms": {
+            "default": 300,
+            "description": "Optional swipe duration in milliseconds (clamped to 50-5000). When omitted, uses zero-fling daemon timing or 300 ms on ADB shell fallback.",
+            "maximum": 5000,
+            "minimum": 50,
+            "type": "integer"
+          },
+          "x1": {
+            "description": "Swipe start X coordinate in screen pixels from the left edge (>= 0).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "x2": {
+            "description": "Swipe end X coordinate in screen pixels from the left edge (>= 0).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "y1": {
+            "description": "Swipe start Y coordinate in screen pixels from the top edge (>= 0).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "y2": {
+            "description": "Swipe end Y coordinate in screen pixels from the top edge (>= 0).",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "x1",
+          "y1",
+          "x2",
+          "y2"
+        ],
+        "type": "object"
+      },
+      "name": "android_swipe"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false,
+        "title": "Type Text into Focused Android Field"
+      },
+      "description": "Types ASCII or Unicode text into the currently focused Android input field on the first connected ADB device (or device_serial), optionally sending ENTER afterward, and records the input action in the navigation graph. Focus the field first with android_tap_element or android_explore_and_click if no cursor is active; use android_keyevent instead for navigation or hardware keys. Blocks until text entry (via input command or clipboard paste for non-ASCII) completes and returns the typed character count, or an error if text is empty or ADB dispatch fails.",
+      "inputSchema": {
+        "properties": {
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "press_enter": {
+            "default": false,
+            "description": "When true, sends Android ENTER (keycode 66) immediately after typing. Default: false.",
+            "type": "boolean"
+          },
+          "text": {
+            "description": "Non-empty ASCII or Unicode string to type into the currently focused field.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "android_type_text"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false,
+        "title": "Send Android Hardware/System Keyevent"
+      },
+      "description": "Sends a system or hardware Android keyevent (such as HOME, BACK, ENTER, APP_SWITCH, POWER, VOLUME_UP, or an integer KeyEvent code) to the first connected ADB device (or device_serial) and records the action in the navigation graph. Use for system navigation, dismissing dialogs (BACK), toggling screen sleep (POWER), or hardware keys instead of coordinate/selector UI tools (android_tap_element, android_swipe, android_type_text); note POWER alters device lock state. Blocks until dispatched and returns the key name and numeric code, or an error on unrecognized key names or ADB failure.",
+      "inputSchema": {
+        "properties": {
+          "device_serial": {
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device.",
+            "type": "string"
+          },
+          "keycode": {
+            "description": "Case-insensitive Android key name (optional 'KEYCODE_' prefix: HOME, BACK, RECENTS, APP_SWITCH, ENTER, DELETE, VOLUME_UP, VOLUME_DOWN, POWER, WAKEUP, NOTIFICATION, PASTE) or unsigned integer Android KeyEvent code (e.g. '3', '4', '26').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "keycode"
+        ],
+        "type": "object"
+      },
+      "name": "android_keyevent"
+    }
+  ]
+}

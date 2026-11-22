@@ -10,14 +10,19 @@ data class DaemonConfig(
     val meaningfulOnly: Boolean = false,
     val watchStdin: Boolean = true,
     val clientQueueCapacity: Int = DEFAULT_CLIENT_QUEUE_CAPACITY,
+    val connectRetries: Int = DEFAULT_CONNECT_RETRIES,
+    val connectRetryDelayMs: Long = DEFAULT_CONNECT_RETRY_DELAY_MS,
+    val waitBoot: Boolean = false,
     val verbose: Boolean = false
 ) {
     init {
-        require(port in 1024..65535) { "port must be in 1024..65535, got $port" }
+        require(port == 0 || port in 1024..65535) { "port must be 0 (ephemeral) or in 1024..65535, got $port" }
         require(debounceMs in 0L..5000L) { "debounceMs must be in 0..5000, got $debounceMs" }
         require(maxDepth in 1..256) { "maxDepth must be in 1..256, got $maxDepth" }
         require(heartbeatMs in 500L..60000L) { "heartbeatMs must be in 500..60000, got $heartbeatMs" }
         require(clientQueueCapacity in 4..1024) { "clientQueueCapacity must be in 4..1024, got $clientQueueCapacity" }
+        require(connectRetries in 0..30) { "connectRetries must be in 0..30, got $connectRetries" }
+        require(connectRetryDelayMs in 50L..5000L) { "connectRetryDelayMs must be in 50..5000, got $connectRetryDelayMs" }
     }
 
     companion object {
@@ -26,6 +31,8 @@ data class DaemonConfig(
         const val DEFAULT_MAX_DEPTH = 48
         const val DEFAULT_HEARTBEAT_MS = 5000L
         const val DEFAULT_CLIENT_QUEUE_CAPACITY = 32
+        const val DEFAULT_CONNECT_RETRIES = 8
+        const val DEFAULT_CONNECT_RETRY_DELAY_MS = 500L
 
         fun parse(args: Array<String>): DaemonConfig {
             var port = DEFAULT_PORT
@@ -37,6 +44,9 @@ data class DaemonConfig(
             var meaningfulOnly = false
             var watchStdin = true
             var clientQueueCapacity = DEFAULT_CLIENT_QUEUE_CAPACITY
+            var connectRetries = DEFAULT_CONNECT_RETRIES
+            var connectRetryDelayMs = DEFAULT_CONNECT_RETRY_DELAY_MS
+            var waitBoot = false
             var verbose = false
 
             var i = 0
@@ -73,6 +83,11 @@ data class DaemonConfig(
                         ?: throw IllegalArgumentException("Invalid --heartbeat-ms value")
                     "--queue-capacity" -> clientQueueCapacity = nextValue().toIntOrNull()
                         ?: throw IllegalArgumentException("Invalid --queue-capacity value")
+                    "--connect-retries" -> connectRetries = nextValue().toIntOrNull()
+                        ?: throw IllegalArgumentException("Invalid --connect-retries value")
+                    "--connect-retry-delay-ms" -> connectRetryDelayMs = nextValue().toLongOrNull()
+                        ?: throw IllegalArgumentException("Invalid --connect-retry-delay-ms value")
+                    "--wait-boot" -> waitBoot = parseBoolFlag(key, inlineVal)
                     "--include-unimportant" -> includeUnimportant = parseBoolFlag(key, inlineVal)
                     "--include-invisible" -> includeInvisible = parseBoolFlag(key, inlineVal)
                     "--meaningful-only" -> meaningfulOnly = parseBoolFlag(key, inlineVal)
@@ -94,22 +109,28 @@ data class DaemonConfig(
                 meaningfulOnly = meaningfulOnly,
                 watchStdin = watchStdin,
                 clientQueueCapacity = clientQueueCapacity,
+                connectRetries = connectRetries,
+                connectRetryDelayMs = connectRetryDelayMs,
+                waitBoot = waitBoot,
                 verbose = verbose
             )
         }
 
         fun usage(): String = buildString {
             appendLine("Usage: app_process / com.shadowgraph.daemon.DaemonMain [options]")
-            appendLine("  --port=<1024..65535>        Loopback TCP port (default: $DEFAULT_PORT)")
-            appendLine("  --debounce-ms=<0..5000>     Event coalescing window in ms (default: $DEFAULT_DEBOUNCE_MS)")
-            appendLine("  --max-depth=<1..256>        Max UI tree traversal depth (default: $DEFAULT_MAX_DEPTH)")
-            appendLine("  --heartbeat-ms=<500..60000> Heartbeat frame interval in ms (default: $DEFAULT_HEARTBEAT_MS)")
-            appendLine("  --queue-capacity=<4..1024>  Per-client outbound frame queue (default: $DEFAULT_CLIENT_QUEUE_CAPACITY)")
-            appendLine("  --include-unimportant       Include non-important accessibility views")
-            appendLine("  --include-invisible         Include invisible-to-user nodes")
-            appendLine("  --meaningful-only           Filter to interactive/text/resourceId nodes (AndroidUINode style)")
-            appendLine("  --no-stdin-watchdog         Disable stdin EOF auto-shutdown (for detached mode)")
-            appendLine("  --verbose                   Emit diagnostic logs to stderr")
+            appendLine("  --port=<0|1024..65535>           Loopback TCP port; 0 selects an ephemeral port (default: $DEFAULT_PORT)")
+            appendLine("  --debounce-ms=<0..5000>          Event coalescing window in ms (default: $DEFAULT_DEBOUNCE_MS)")
+            appendLine("  --max-depth=<1..256>             Max UI tree traversal depth (default: $DEFAULT_MAX_DEPTH)")
+            appendLine("  --heartbeat-ms=<500..60000>      Heartbeat frame interval in ms (default: $DEFAULT_HEARTBEAT_MS)")
+            appendLine("  --queue-capacity=<4..1024>       Per-client outbound frame queue (default: $DEFAULT_CLIENT_QUEUE_CAPACITY)")
+            appendLine("  --connect-retries=<0..30>        UiAutomation connect retries for headless/emulator boot (default: $DEFAULT_CONNECT_RETRIES)")
+            appendLine("  --connect-retry-delay-ms=<50..5000> Initial backoff delay between connect retries (default: $DEFAULT_CONNECT_RETRY_DELAY_MS)")
+            appendLine("  --wait-boot                      Wait for sys.boot_completed=1 before connecting UiAutomation")
+            appendLine("  --include-unimportant            Include non-important accessibility views")
+            appendLine("  --include-invisible              Include invisible-to-user nodes")
+            appendLine("  --meaningful-only                Filter to interactive/text/resourceId nodes (AndroidUINode style)")
+            appendLine("  --no-stdin-watchdog              Disable stdin EOF auto-shutdown (for detached mode)")
+            appendLine("  --verbose                        Emit diagnostic logs to stderr")
         }
 
         private fun parseBoolFlag(key: String, inlineVal: String?): Boolean {

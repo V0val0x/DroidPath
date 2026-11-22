@@ -327,10 +327,33 @@ export function buildOpenAIToolSchemas() {
     },
     {
       name: "android_get_ui_tree",
-      description: "Reads interactive Android UI elements from the sub-millisecond Shadow DOM stream.",
+      description:
+        "Reads interactive Android UI elements from the sub-millisecond Shadow DOM stream. Supports opt-in hybrid UI Tree + Vision streaming via include_vision=true (off by default, strictly blocked on FLAG_SECURE screens).",
       parameters: {
         type: "object",
-        properties: { device_serial: serialProp },
+        properties: {
+          include_vision: {
+            type: "boolean",
+            default: false,
+            description:
+              "Opt-in multimodal mode: attaches a downscaled compressed JPEG screenshot alongside the UI tree. Off by default; strictly blocked on FLAG_SECURE screens.",
+          },
+          vision_max_width: {
+            type: "integer",
+            minimum: 160,
+            maximum: 1080,
+            default: 540,
+            description: "Maximum pixel width for downscaled JPEG when include_vision is true (160-1080). Default: 540.",
+          },
+          vision_quality: {
+            type: "integer",
+            minimum: 10,
+            maximum: 85,
+            default: 50,
+            description: "JPEG compression quality (10-85) when include_vision is true. Default: 50.",
+          },
+          device_serial: serialProp,
+        },
         required: [],
       },
     },

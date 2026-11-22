@@ -3,6 +3,7 @@ pub mod hasher;
 pub mod hazard;
 pub mod models;
 pub mod seed;
+pub mod telemetry;
 
 pub use engine::{SpatialGraphEngine, TopologyChangedHandler};
 pub use hasher::{ScreenLayoutHasher, ScreenSemanticFingerprint};
@@ -12,3 +13,7 @@ pub use models::{
     SpatialGraphSnapshot, UIActionKind,
 };
 pub use seed::{SeedGraphCatalog, SeedMergeReport};
+pub use telemetry::{
+    AgenticFeedback, AgenticFeedbackBuilder, ChangedNodeSummary, FeedbackCandidate,
+    ScreenDeltaSummary,
+};
