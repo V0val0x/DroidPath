@@ -23,7 +23,7 @@ pub use manager::{
 pub use mcp::{
     DroidPathHttpServer, DroidPathMcpServerCore, DroidPathStdioTransport,
     DroidPathUITreeFallbackParser, McpJsonRpcError, McpJsonRpcRequest, McpJsonRpcResponse,
-    McpToolDefinition, McpToolResult,
+    McpToolAnnotations, McpToolDefinition, McpToolResult,
 };
 pub use protocol::{
     DaemonCommand, NdjsonWireCodec, ShadowCompactNode, ShadowPatchMask, ShadowTreeMatchMode,

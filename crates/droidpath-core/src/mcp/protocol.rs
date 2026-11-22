@@ -60,11 +60,22 @@ impl McpJsonRpcResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolAnnotations {
+    pub title: &'static str,
+    pub read_only_hint: bool,
+    pub destructive_hint: bool,
+    pub idempotent_hint: bool,
+    pub open_world_hint: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct McpToolDefinition {
     pub name: &'static str,
     pub description: &'static str,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    pub annotations: McpToolAnnotations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +109,7 @@ pub struct DroidPathMcpServerCore {
 }
 
 impl DroidPathMcpServerCore {
-    pub const PROTOCOL_VERSION: &'static str = "2024-11-05";
+    pub const PROTOCOL_VERSION: &'static str = "2025-03-26";
     pub const SERVER_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     pub fn new(manager: Arc<DroidPathManager>) -> Self {
@@ -179,79 +190,109 @@ impl DroidPathMcpServerCore {
     pub fn tool_definitions() -> Vec<McpToolDefinition> {
         let serial_prop = json!({
             "type": "string",
-            "description": "Optional ADB device serial. Defaults to the first connected device."
+            "description": "Optional ADB device serial from android_list_devices. Defaults to the first connected Android device."
         });
 
         vec![
             McpToolDefinition {
                 name: "android_navigate_to_node",
-                description: "Layer 3 Persistent A* Symbolic UI Router. Computes the shortest path across known screens in the Spatial Graph and executes taps/swipes via live Shadow DOM feedback without intermediate LLM calls.",
+                description: "Computes and executes a shortest multi-step tap/swipe route to an Android screen or UI element using the persisted navigation graph without intermediate LLM calls. Use for known multi-screen workflows on the first connected ADB device (or device_serial); set auto_explore to true to fall back to live discovery if no cached route exists, or use android_explore_and_click for single-screen searches and android_tap_element for an already-visible control. Blocks until arrival, pauses with requires_confirmation on hazardous steps unless confirmed=true, and returns JSON with status (arrived, already_at_target, no_route, target_not_found, secure_screen_active, or path_deviation error), screen hashes, and executed steps.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
-                            "description": "Target UI text, resource-id, package name, or screen title (e.g. 'Night Light', 'Display and touch')."
+                            "description": "Target UI text, resource-id, Android package name, or screen title (e.g. 'Night Light', 'Display'). Provide at least one of target or target_hash."
                         },
                         "target_hash": {
                             "type": "string",
-                            "description": "Optional exact target layout hash in 0x... hex or decimal format."
+                            "description": "Exact target layout hash in '0x...' hexadecimal or unsigned integer format. Optional alternative when target text is omitted."
                         },
                         "max_steps": {
                             "type": "integer",
-                            "description": "Maximum navigation hops allowed (1-30). Default: 12."
+                            "minimum": 1,
+                            "maximum": 30,
+                            "default": 12,
+                            "description": "Maximum navigation hops allowed across the graph before aborting (clamped to 1-30). Default: 12."
                         },
                         "step_timeout_ms": {
                             "type": "integer",
-                            "description": "Per-step Shadow DOM settlement timeout in ms (250-10000). Default: 2000."
+                            "minimum": 250,
+                            "maximum": 10000,
+                            "default": 2000,
+                            "description": "Blocking per-step UI settlement wait timeout in milliseconds while verifying screen transitions (clamped to 250-10000). Default: 2000."
                         },
                         "confirmed": {
                             "type": "boolean",
-                            "description": "Set to true ONLY after explicit human confirmation in chat to execute hazardous/irreversible steps (payment, purchase, delete). Default: false."
+                            "default": false,
+                            "description": "Must remain false unless re-invoking after explicit user confirmation in chat for a previously blocked hazardous action (payment, purchase, delete). Default: false."
                         },
                         "auto_explore": {
                             "type": "boolean",
-                            "description": "When true and no known graph route exists (no_route / target_not_found), automatically fall back to live Shadow DOM explore-and-click with bounded scrolling and DAG edge recording. Default: false."
+                            "default": false,
+                            "description": "When true, automatically falls back to live scrolling discovery and graph recording if no cached route reaches the target. Default: false."
                         },
                         "device_serial": serial_prop
                     },
                     "required": []
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Navigate to Android Screen or Node",
+                    read_only_hint: false,
+                    destructive_hint: true,
+                    idempotent_hint: false,
+                    open_world_hint: true,
+                },
             },
             McpToolDefinition {
                 name: "android_explore_and_click",
-                description: "Dynamic Shadow DOM discovery + click with optional A* graph/prefix routing, bounded list scrolling (down/up), hazardous action HITL guard, and automatic Spatial Graph edge recording. Returns top-20 PII-redacted interactive candidates (needs_selection, isError: false) if no confident match is found.",
+                description: "Finds and taps an Android UI element on the current screen (or via a 'Screen > Item' breadcrumb) using live accessibility scanning, bounded scrolling, and optional graph routing on the first connected ADB device or device_serial. Use when the target may require scrolling or is absent from the navigation graph; prefer android_navigate_to_node for learned multi-screen paths, android_tap_element for known coordinates or selectors, or android_get_ui_tree to inspect without acting. Blocks until completion, records new transitions to disk, gates hazardous actions behind requires_confirmation unless confirmed=true, and returns JSON with status (explored_and_clicked, arrived_via_graph, or top-20 PII-redacted candidates under needs_selection when no match meets threshold).",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
-                            "description": "Target UI label, resource_id suffix, content_desc, or breadcrumb path (e.g. 'Night Light', 'Display > Night Light')."
+                            "description": "Non-empty target UI label, resource_id suffix, content_desc, or 'Screen > Item' breadcrumb path (e.g. 'Night Light', 'Display > Night Light')."
                         },
                         "max_scrolls": {
                             "type": "integer",
-                            "description": "Maximum bounded discovery scrolls (0-10). Default: 3."
+                            "minimum": 0,
+                            "maximum": 10,
+                            "default": 3,
+                            "description": "Maximum bounded list scrolls (down then up) during live search before returning candidates (clamped to 0-10). Default: 3."
                         },
                         "step_timeout_ms": {
                             "type": "integer",
-                            "description": "Per-step Shadow DOM settlement timeout in ms (250-10000). Default: 2000."
+                            "minimum": 250,
+                            "maximum": 10000,
+                            "default": 2000,
+                            "description": "Blocking per-step UI settlement wait in milliseconds after scrolls or route steps (clamped to 250-10000). Default: 2000."
                         },
                         "confirmed": {
                             "type": "boolean",
-                            "description": "Set to true ONLY after explicit human confirmation in chat to click hazardous/irreversible elements. Default: false."
+                            "default": false,
+                            "description": "Must remain false unless re-invoking after explicit user confirmation in chat for a blocked hazardous/irreversible element. Default: false."
                         },
                         "prefer_graph_route": {
                             "type": "boolean",
-                            "description": "Try known A* graph route (or nearest known prefix vertex) before scanning live Shadow DOM. Default: true."
+                            "default": true,
+                            "description": "When true, tries known graph routes before performing live on-screen scrolling search. Default: true."
                         },
                         "device_serial": serial_prop
                     },
                     "required": ["target"]
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Discover and Click Android Element",
+                    read_only_hint: false,
+                    destructive_hint: true,
+                    idempotent_hint: false,
+                    open_world_hint: true,
+                },
             },
             McpToolDefinition {
                 name: "android_get_ui_tree",
-                description: "Reads interactive Android UI elements from the sub-millisecond Kotlin Shadow DOM stream (falls back to uiautomator XML if daemon stream is cold).",
+                description: "Reads visible Android UI nodes from the live accessibility stream (falling back to uiautomator XML dump if the stream is cold) on the first connected ADB device or device_serial. Use for read-only UI inspection without touching the screen or modifying the navigation graph; prefer android_graph_stats for learned graph telemetry, or android_explore_and_click to locate and tap in a single call. Blocks briefly if accessibility recovery or XML fallback runs and returns a JSON array of nodes containing index, text, resource_id, content_desc, class, clickable, scrollable, bounds, center_x, and center_y (or an error if ADB fails).",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -259,81 +300,180 @@ impl DroidPathMcpServerCore {
                     },
                     "required": []
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Read Live Android UI Tree",
+                    read_only_hint: true,
+                    destructive_hint: false,
+                    idempotent_hint: true,
+                    open_world_hint: false,
+                },
             },
             McpToolDefinition {
                 name: "android_graph_stats",
-                description: "Returns Spatial Graph telemetry: learned screen vertices, action edges, active canonical layout hash, daemon state, and persisted graph path.",
+                description: "Returns a read-only telemetry snapshot of the persisted Android UI navigation graph without sending input to any device. Use before android_navigate_to_node to verify whether routes exist, inspect the active screen hash, or check accessibility daemon status; use android_get_ui_tree instead to inspect live UI elements on screen. Takes no arguments, executes locally without requiring an active device (reporting zero counts if no graph is learned yet), and returns JSON with vertex_count, seed_vertex_count, hydrated_vertex_count, edge_count, current_state_hash (0x hex or null), current_package, daemon_state, has_fresh_shadow_dom, and storage_path.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
                     "required": []
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Get Spatial Graph Telemetry",
+                    read_only_hint: true,
+                    destructive_hint: false,
+                    idempotent_hint: true,
+                    open_world_hint: false,
+                },
             },
             McpToolDefinition {
                 name: "android_list_devices",
-                description: "Lists connected Android devices visible over USB or Wireless ADB.",
+                description: "Lists connected Android devices visible to ADB over USB or Wi-Fi without altering device state. Use in multi-device setups to obtain exact device_serial values for other Android tools; unnecessary when only one device is attached because action tools default to the first device. Runs quickly in read-only mode and returns a JSON array of objects with serial, model, and connection ('usb' or 'wifi'), or an error if ADB is unavailable.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
                     "required": []
                 }),
+                annotations: McpToolAnnotations {
+                    title: "List Connected Android Devices",
+                    read_only_hint: true,
+                    destructive_hint: false,
+                    idempotent_hint: true,
+                    open_world_hint: false,
+                },
             },
             McpToolDefinition {
                 name: "android_tap_element",
-                description: "Taps an Android UI element by coordinates (x, y) or semantic text / resource_id / content_desc, recording the transition edge into the Spatial Graph.",
+                description: "Taps the first connected Android device (or device_serial) at exact screen pixel coordinates (x, y from top-left (0, 0); takes precedence if paired with selectors) or by matching a visible element via text, resource_id, or content_desc. Use when coordinates or exact selectors on the current screen are already known; prefer android_explore_and_click for off-screen scrolling or fuzzy matching, and android_swipe for dragging/scrolling. Records the tap in the persisted navigation graph, blocks briefly during selector lookup and input injection, and returns confirmation text with tapped coordinates or an error if inputs are missing or no node matches.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "x": { "type": "integer", "description": "Exact screen X coordinate." },
-                        "y": { "type": "integer", "description": "Exact screen Y coordinate." },
-                        "text": { "type": "string", "description": "Case-insensitive substring match against node text." },
-                        "resource_id": { "type": "string", "description": "Match against view resource-id." },
-                        "content_desc": { "type": "string", "description": "Substring match against content-desc." },
+                        "x": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Horizontal tap position in screen pixels from the left edge (top-left origin 0, 0). Requires y; takes precedence over text/id/desc selectors."
+                        },
+                        "y": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Vertical tap position in screen pixels from the top edge (top-left origin 0, 0). Requires x; takes precedence over text/id/desc selectors."
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Case-insensitive text match against visible UI nodes (combined with resource_id/content_desc when multiple selectors are provided)."
+                        },
+                        "resource_id": {
+                            "type": "string",
+                            "description": "Substring/suffix match against view resource-id (e.g. 'com.android.settings:id/search_bar')."
+                        },
+                        "content_desc": {
+                            "type": "string",
+                            "description": "Case-insensitive substring match against accessibility content-desc."
+                        },
                         "device_serial": serial_prop
                     },
                     "required": []
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Tap Android Element or Coordinates",
+                    read_only_hint: false,
+                    destructive_hint: true,
+                    idempotent_hint: false,
+                    open_world_hint: true,
+                },
             },
             McpToolDefinition {
                 name: "android_swipe",
-                description: "Performs a touch swipe from (x1, y1) to (x2, y2) and attributes the action to the Spatial Graph.",
+                description: "Performs a blocking touch swipe from start (x1, y1) to end (x2, y2) in screen pixel coordinates (top-left origin (0, 0)) over duration_ms on the first connected ADB device or device_serial, and records the swipe edge in the navigation graph. Use for custom coordinate-based scrolling, dismissing panels, or dragging when start and end pixels are known; prefer android_explore_and_click to scroll and click a named list item automatically, android_tap_element for single taps, and android_navigate_to_node for learned paths. Blocks until the swipe finishes and returns confirmation text with coordinates and effective duration in ms, or an error if ADB fails.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "x1": { "type": "integer" },
-                        "y1": { "type": "integer" },
-                        "x2": { "type": "integer" },
-                        "y2": { "type": "integer" },
-                        "duration_ms": { "type": "integer", "description": "Swipe duration in ms (default 300)." },
+                        "x1": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Swipe start X coordinate in screen pixels from the left edge (>= 0)."
+                        },
+                        "y1": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Swipe start Y coordinate in screen pixels from the top edge (>= 0)."
+                        },
+                        "x2": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Swipe end X coordinate in screen pixels from the left edge (>= 0)."
+                        },
+                        "y2": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Swipe end Y coordinate in screen pixels from the top edge (>= 0)."
+                        },
+                        "duration_ms": {
+                            "type": "integer",
+                            "minimum": 50,
+                            "maximum": 5000,
+                            "default": 300,
+                            "description": "Optional swipe duration in milliseconds (clamped to 50-5000). When omitted, uses zero-fling daemon timing or 300 ms on ADB shell fallback."
+                        },
                         "device_serial": serial_prop
                     },
                     "required": ["x1", "y1", "x2", "y2"]
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Perform Android Touch Swipe",
+                    read_only_hint: false,
+                    destructive_hint: false,
+                    idempotent_hint: false,
+                    open_world_hint: true,
+                },
             },
             McpToolDefinition {
                 name: "android_type_text",
-                description: "Types ASCII or Unicode text into the focused Android input field with optional press_enter.",
+                description: "Types ASCII or Unicode text into the currently focused Android input field on the first connected ADB device (or device_serial), optionally sending ENTER afterward, and records the input action in the navigation graph. Focus the field first with android_tap_element or android_explore_and_click if no cursor is active; use android_keyevent instead for navigation or hardware keys. Blocks until text entry (via input command or clipboard paste for non-ASCII) completes and returns the typed character count, or an error if text is empty or ADB dispatch fails.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "text": { "type": "string", "description": "Text to type." },
-                        "press_enter": { "type": "boolean", "description": "Send ENTER keyevent after typing." },
+                        "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Non-empty ASCII or Unicode string to type into the currently focused field."
+                        },
+                        "press_enter": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "When true, sends Android ENTER (keycode 66) immediately after typing. Default: false."
+                        },
                         "device_serial": serial_prop
                     },
                     "required": ["text"]
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Type Text into Focused Android Field",
+                    read_only_hint: false,
+                    destructive_hint: false,
+                    idempotent_hint: false,
+                    open_world_hint: true,
+                },
             },
             McpToolDefinition {
                 name: "android_keyevent",
-                description: "Sends an Android keyevent (e.g. HOME, BACK, ENTER, APP_SWITCH, POWER).",
+                description: "Sends a system or hardware Android keyevent (such as HOME, BACK, ENTER, APP_SWITCH, POWER, VOLUME_UP, or an integer KeyEvent code) to the first connected ADB device (or device_serial) and records the action in the navigation graph. Use for system navigation, dismissing dialogs (BACK), toggling screen sleep (POWER), or hardware keys instead of coordinate/selector UI tools (android_tap_element, android_swipe, android_type_text); note POWER alters device lock state. Blocks until dispatched and returns the key name and numeric code, or an error on unrecognized key names or ADB failure.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "keycode": { "type": "string", "description": "Key name or integer keycode." },
+                        "keycode": {
+                            "type": "string",
+                            "description": "Case-insensitive Android key name (optional 'KEYCODE_' prefix: HOME, BACK, RECENTS, APP_SWITCH, ENTER, DELETE, VOLUME_UP, VOLUME_DOWN, POWER, WAKEUP, NOTIFICATION, PASTE) or unsigned integer Android KeyEvent code (e.g. '3', '4', '26')."
+                        },
                         "device_serial": serial_prop
                     },
                     "required": ["keycode"]
                 }),
+                annotations: McpToolAnnotations {
+                    title: "Send Android Hardware/System Keyevent",
+                    read_only_hint: false,
+                    destructive_hint: true,
+                    idempotent_hint: false,
+                    open_world_hint: true,
+                },
             },
         ]
     }

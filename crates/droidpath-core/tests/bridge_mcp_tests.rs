@@ -299,7 +299,7 @@ async fn test_mcp_server_initialize_tools_list_stats_and_persistence_roundtrip()
         .unwrap();
     let init_str = String::from_utf8(init_resp).unwrap();
     assert!(init_str.contains("droidpath-mcp"));
-    assert!(init_str.contains("2024-11-05"));
+    assert!(init_str.contains("2025-03-26"));
 
     let list_resp = server
         .handle_raw_request_data(br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
@@ -309,6 +309,31 @@ async fn test_mcp_server_initialize_tools_list_stats_and_persistence_roundtrip()
     assert!(list_str.contains("android_navigate_to_node"));
     assert!(list_str.contains("android_graph_stats"));
     assert!(list_str.contains("confirmed"));
+
+    let list_val: serde_json::Value = serde_json::from_str(&list_str).unwrap();
+    let tools = list_val["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 9);
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let ann = tool["annotations"].as_object().expect("missing annotations");
+        assert!(
+            ann.get("title").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
+            "tool {name} missing annotations.title"
+        );
+        for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+            assert!(ann.get(hint).and_then(|v| v.as_bool()).is_some(), "tool {name} missing {hint}");
+        }
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        for (prop_name, prop_schema) in props {
+            assert!(
+                prop_schema
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty()),
+                "tool {name} property {prop_name} missing description"
+            );
+        }
+    }
 
     // Populate graph & persist
     let screen_a = Arc::new(ShadowTreeIndex::new(
