@@ -21,7 +21,7 @@ jobs:
         run: |
           chmod +x android-daemon/gradlew android-daemon/scripts/*.sh
           ./android-daemon/scripts/build-dex.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-daemon
           path: android-daemon/build/dist/android-daemon.jar
@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mcp-${{ matrix.target }}
           path: dist/${{ matrix.asset }}
@@ -93,7 +93,7 @@ jobs:
       - name: Build Tauri v2 Desktop HUD bundle
         working-directory: apps/droidpath-desktop
         run: npm install && npx tauri build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.os }}
           path: |
