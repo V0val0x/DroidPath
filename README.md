@@ -9,6 +9,7 @@
 [![Platforms: Windows · Linux · macOS · Android](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue.svg)](https://github.com/V0val0x/DroidPath)
 [![GitHub Release](https://img.shields.io/github/v/release/V0val0x/DroidPath?color=brightgreen)](https://github.com/V0val0x/DroidPath/releases)
 [![CI](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml/badge.svg)](https://github.com/V0val0x/DroidPath/actions/workflows/ci.yml)
+[![V0val0x/DroidPath MCP server](https://glama.ai/mcp/servers/V0val0x/DroidPath/badges/score.svg)](https://glama.ai/mcp/servers/V0val0x/DroidPath)
 
 **English** | [Русская версия (Russian)](README_RU.md) · [Agent Integrations](docs/integrations.md) · [Benchmarks](docs/benchmarks.md) · [Headless Docker Fleets](docs/headless-docker.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
 
